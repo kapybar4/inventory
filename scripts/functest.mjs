@@ -305,7 +305,7 @@ check('非法日期被拒绝（日历上不存在的日期也要拦住）', () =
 check('非法日期不会落库（也污染不到到期计算）', () => {
   const found = json(['item', 'list', '--all', '--search', '坏日期']).data.data.items;
   eq(found.length, 0, '不该有任何一条被写进去');
-  const tl = json(['timeline', '--granularity', 'year']).data.data;
+  const tl = json(['timeline']).data.data;
   const bad = tl.groups.flatMap((g) => g.entries).filter((e) => !/^\d{4}-\d{2}-\d{2}$/.test(e.expiresOn));
   eq(bad.length, 0, '时间轴里不该出现格式错误的到期日');
   return '库与时间轴都干净';
@@ -756,45 +756,73 @@ check('alert list --within 过滤生效', () => {
   return `${all.length} → ${within.length}`;
 });
 
-check('时间轴：四种粒度都能出格', () => {
-  const counts = {};
-  for (const g of ['day', 'week', 'month', 'year']) {
-    const d = json(['timeline', '--granularity', g]).data.data;
-    ok(d.slots.length > 0, `${g} 应有时间格`);
-    counts[g] = d.slots.length;
+check('时间轴：固定按天，范围是上周一 ~ 下下周日（28 格）', () => {
+  const d = json(['timeline']).data.data;
+  eq(d.slots.length, 28, '4 周 × 7 天');
+  eq(d.slots[0].start, d.slots[0].end, '按天，起点终点同一天');
+  const startDay = new Date(d.slots[0].start + 'T00:00:00').getDay();
+  const endDay = new Date(d.slots[27].end + 'T00:00:00').getDay();
+  eq(startDay, 1, '起点是周一');
+  eq(endDay, 0, '终点是周日');
+  const todays = d.slots.filter((s) => s.current);
+  eq(todays.length, 1, '有且只有一格是今天');
+  eq(todays[0].start, d.today, '标的就是今天');
+  return `${d.slots[0].start} ~ ${d.slots[27].end}`;
+});
+
+check('时间轴标注：只标今天 / 周一 / 月初，不标周末', () => {
+  const d = json(['timeline']).data.data;
+  const labelled = d.slots.filter((s) => s.label);
+  ok(labelled.length > 0, '应当有标注');
+
+  for (const s of labelled) {
+    const day = new Date(s.start + 'T00:00:00').getDay();
+    const isMonday = day === 1;
+    const isFirst = s.start.slice(8) === '01';
+    ok(
+      s.current || isMonday || isFirst,
+      `${s.start} 被标了「${s.label}」，但它既不是今天也不是周一/月初`,
+    );
+    // 相邻周的衔接处只留下一周的开始：周末永远不该有标注
+    ok(day !== 0 && day !== 6, `${s.start} 是周末，不该标注`);
   }
-  return Object.entries(counts).map(([k, v]) => `${k}:${v}`).join(' ');
+
+  // 每一个周一都要标出来
+  const mondays = d.slots.filter((s) => new Date(s.start + 'T00:00:00').getDay() === 1);
+  eq(d.slots.filter((s) => s.weekStart).length, mondays.length, '每个周一都算一周的开始');
+  return `${labelled.length} 格有标注`;
 });
 
 check('时间轴：范围内的条目必落在格内，范围外的标 -1', () => {
-  // 用一个足够大的窗口，让演示数据里的日期都落进来
-  // 年粒度 + 足够大的窗口：要覆盖到 2099 那种远期数据
-  const d = json(['timeline', '--granularity', 'year', '--past', '240', '--future', '1200']).data.data;
+  const d = json(['timeline']).data.data;
   const entries = d.groups.flatMap((g) => g.entries);
   ok(entries.length > 0, '应有条目');
+
+  let inside = 0;
+  let outside = 0;
   for (const e of entries) {
-    ok(e.slot >= 0, `${e.itemName}@${e.expiresOn} 应落在范围内`);
+    if (e.slot < 0) {
+      // 4 周窗口装不下所有到期日，落在范围外是正常的，但必须真的是范围外
+      ok(
+        e.expiresOn < d.slots[0].start || e.expiresOn > d.slots[27].end,
+        `${e.itemName}@${e.expiresOn} 标了 -1，但它其实在范围内`,
+      );
+      outside += 1;
+      continue;
+    }
     const s = d.slots[e.slot];
-    ok(e.expiresOn >= s.start && e.expiresOn <= s.end, `${e.expiresOn} 不在格 ${s.label} 内`);
+    ok(s, `${e.itemName} 的 slot=${e.slot} 越界了`);
+    ok(e.expiresOn >= s.start && e.expiresOn <= s.end, `${e.expiresOn} 不在格 ${s.start} 内`);
+    inside += 1;
   }
-  // 反过来：窄窗口下，范围外的必须标成 -1 而不是乱指一格
-  const narrow = json(['timeline', '--granularity', 'month', '--past', '1', '--future', '1']).data.data;
-  const far = narrow.groups.flatMap((g) => g.entries).filter((e) => e.slot < 0);
-  ok(far.length > 0, '窄窗口下应有条目落在范围外');
-  for (const e of far) ok(e.slot === -1, `${e.expiresOn} 应标 -1`);
-  return `${entries.length} 条在范围内，窄窗口 ${far.length} 条标 -1`;
+  return `${inside} 条在范围内，${outside} 条标 -1`;
 });
 
-check('时间轴：--past/--future 改变覆盖范围', () => {
-  const a = json(['timeline', '--granularity', 'month', '--past', '1', '--future', '2']).data.data;
-  const b = json(['timeline', '--granularity', 'month', '--past', '12', '--future', '24']).data.data;
-  ok(a.slots.length < b.slots.length, `窄范围应格数更少：${a.slots.length} vs ${b.slots.length}`);
-  return `${a.slots.length} vs ${b.slots.length}`;
-});
-
-check('时间轴：非法粒度被拒绝', () => {
-  const r = cli(['timeline', '--granularity', '季度']);
+check('时间轴不再接受粒度 / 范围参数', () => {
+  const r = cli(['timeline', '--granularity', 'year']);
   eq(r.code, 2, '退出码');
+  ok(/未知选项/.test(r.err), `应报未知选项：${r.err.trim().slice(0, 60)}`);
+  eq(cli(['timeline', '--past', '12']).code, 2, '--past 也不认了');
   return 'exit 2';
 });
 

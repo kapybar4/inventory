@@ -269,8 +269,13 @@ interface ItemDetail {
 interface TimeSlot {
   start: string;
   end: string;
+  /** 横轴上的标注。空串 = 这一格不写字（只画格线） */
   label: string;
   current: boolean;
+  /** 是不是某一周的第一天（周一）。今天恰好是周一时两者同时为真 */
+  weekStart: boolean;
+  /** 标注种类，用来上色：今天 / 某周开始 / 月初 */
+  labelKind?: 'today' | 'week' | 'month';
 }
 
 interface TimelineEntry {
@@ -289,7 +294,6 @@ interface TimelineEntry {
 }
 
 interface TimelineData {
-  granularity: 'day' | 'week' | 'month' | 'year';
   today: string;
   slots: TimeSlot[];
   categories: { key: string; label: string; count: number }[];
@@ -444,10 +448,8 @@ interface DshApi {
   onDateChanged(fn: () => void): () => void;
   /** 时间轴 */
   timeline: {
-    data(
-      wsId: string | null,
-      opts?: { granularity?: string; past?: number; future?: number },
-    ): Promise<TimelineData>;
+    /** 范围与粒度都固定，不再有参数 */
+    data(wsId: string | null): Promise<TimelineData>;
   };
   io: {
     exportWs(wsId?: string | null): Promise<{
@@ -486,7 +488,6 @@ const state: {
   wsId: string | null;
   alert: AlertSummary | null;
   timeline: TimelineData | null;
-  timelineGranularity: 'day' | 'week' | 'month' | 'year';
   timelineCategory: string;
   items: ItemRow[];
   detail: ItemDetail | null;
@@ -532,7 +533,6 @@ const state: {
   wsId: null,
   alert: null,
   timeline: null,
-  timelineGranularity: 'month',
   timelineCategory: '',
   items: [],
   detail: null,
@@ -986,9 +986,7 @@ async function loadTimeline(): Promise<void> {
     state.timeline = null;
     return;
   }
-  state.timeline = await window.api.timeline.data(state.wsId, {
-    granularity: state.timelineGranularity,
-  });
+  state.timeline = await window.api.timeline.data(state.wsId);
 }
 
 /** 拉分组树（层级、排序字段、组顺序都由工作区偏好决定） */
@@ -2002,26 +2000,16 @@ function renderTimeline(view: HTMLElement): void {
   // ── 工具栏 ──
   const bar = el('div', { class: 'toolbar tl-toolbar' });
 
-  const gran = el('div', { class: 'seg' });
-  for (const g of [
-    { key: 'day', label: '日' },
-    { key: 'week', label: '周' },
-    { key: 'month', label: '月' },
-    { key: 'year', label: '年' },
-  ] as const) {
-    const btn = el('button', {
-      class: `seg-btn${data.granularity === g.key ? ' active' : ''}`,
-      text: g.label,
-      type: 'button',
-    });
-    btn.title = `按${g.label}显示`;
-    btn.addEventListener('click', () => {
-      state.timelineGranularity = g.key;
-      void loadTimeline().then(render);
-    });
-    gran.append(btn);
-  }
-  bar.append(el('span', { class: 'tl-label', text: '粒度' }), gran);
+  /*
+   * 粒度选择器已取消：时间轴固定按天，范围固定为「上周一 ~ 下下周日」。
+   * 留一个只有一种可选项的下拉没有意义。
+   */
+  bar.append(
+    el('span', {
+      class: 'tl-range',
+      text: `${data.slots[0]?.start.slice(5) ?? ''} ~ ${data.slots[data.slots.length - 1]?.end.slice(5) ?? ''}`,
+    }),
+  );
 
   // 悬停时在这里显示「哪一格、那一格有几项到期」
   const hint = el('span', { class: 'tl-hint', id: 'tl-hint' });
@@ -2058,7 +2046,8 @@ function renderTimeline(view: HTMLElement): void {
   const scroll = el('div', { class: 'tl-scroll', id: 'tl-scroll' });
   const inner = el('div', { class: 'tl-inner' });
 
-  const SLOT_W = data.granularity === 'day' ? 34 : data.granularity === 'week' ? 92 : data.granularity === 'month' ? 104 : 76;
+  // 只有一种粒度了，宽度写死一处
+  const SLOT_W = 34;
   inner.style.setProperty('--slot-w', `${SLOT_W}px`);
 
   const groups = state.timelineCategory
@@ -2070,12 +2059,20 @@ function renderTimeline(view: HTMLElement): void {
   headRow.append(el('div', { class: 'tl-row-label tl-corner', text: '物品' }));
   const headSlots = el('div', { class: 'tl-slots' });
   data.slots.forEach((s, i) => {
+    /*
+     * 标注分三种（见 main.ts 的 buildSlots）：今天、某周开始、月初。
+     * 其余格子留空但**仍然画出格线** —— 每一格代表一天这个事实不变，
+     * 只是不给每个日期都写字，否则 28 个日期挤成一片没法看。
+     */
+    const kind = `${s.labelKind ? ` tl-slot-${s.labelKind}` : ''}${s.weekStart ? ' tl-week-start' : ''}`;
     const cell = el('div', {
-      class: `tl-slot-head${s.current ? ' tl-today' : ''}`,
+      class: `tl-slot-head${kind}${s.current ? ' tl-today' : ''}`,
       text: s.label,
     });
     cell.dataset['slot'] = String(i);
-    if (s.current) cell.title = `当前：${s.label}`;
+    // 悬停任何一格都能知道那是哪天 —— 没标字不代表没信息
+    cell.title = s.current ? `今天 ${s.start}` : s.start;
+    if (s.labelKind) cell.dataset['labelKind'] = s.labelKind;
     headSlots.append(cell);
   });
   headRow.append(headSlots);

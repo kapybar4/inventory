@@ -29,7 +29,7 @@ npm.cmd start                # 桌面界面（可选）
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 101 项单元测试
+npm.cmd test            # 105 项单元测试
 npm.cmd run test:func   # 145 项 CLI 功能测试
 ```
 
@@ -900,7 +900,7 @@ scripts/build.mjs            编译 + 搬运静态资源
 
 ```
 npm.cmd run typecheck   # 主进程/CLI/core + 渲染层，两套 tsconfig
-npm.cmd test            # 101 项单元测试（不变量 + 回归）
+npm.cmd test            # 105 项单元测试（不变量 + 回归）
 npm.cmd run test:func   # 145 项 CLI/数据层功能测试（真跑命令、核对输出）
 npm.cmd run test:gui    # 34 步桌面端走查（真开 Electron，读 DOM）—— 目前会中途卡住，见「已知限制」
 npm.cmd run test:all    # 单元 + 功能

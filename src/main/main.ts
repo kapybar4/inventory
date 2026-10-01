@@ -83,6 +83,7 @@ import { formatDaysLeft, daysUntil, today } from '../core/dates';
 import { centsToYuan, yuanToCents, parseExtra, serializeExtra } from '../core/values';
 import { formatBytes } from '../core/util';
 import { bootstrapPath, clearBootstrap, writeBootstrap } from '../core/bootstrap';
+import { buildTimelineSlots, slotIndexOf } from '../core/timeline';
 
 /**
  * 把 Chromium 的 profile 目录从**漫游** AppData 挪到**本地** AppData。
@@ -1100,13 +1101,12 @@ function registerHandlers(): void {
     };
   });
 
-  handle('timeline:data', (wsId, opts) => {
-    const o = opts ? asObject(opts) : {};
-    const granularity = typeof o['granularity'] === 'string' ? o['granularity'] : 'month';
+  handle('timeline:data', (wsId) => {
     return withDb(wsId ? asString(wsId, 'wsId') : null, true, (db) => {
       const rows = selectWhere(db, 'items', `${TOP_LEVEL} AND status IN ('in_stock','in_use')`, []);
       const now = new Date();
-      const slots = buildSlots(now, granularity, Number(o['past'] ?? 6), Number(o['future'] ?? 24));
+      // 范围与粒度都固定了，不再接受参数 —— 见 core/timeline.ts 的说明
+      const slots = buildTimelineSlots(now);
 
       const groups = groupByCategory(rows, now).map((g) => ({
         key: g.key,
@@ -1134,7 +1134,6 @@ function registerHandlers(): void {
       }));
 
       return {
-        granularity,
         today: today(now),
         slots,
         categories: groups
@@ -1465,102 +1464,6 @@ function registerHandlers(): void {
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// 时间轴：分格
-// ─────────────────────────────────────────────────────────────
-
-interface Slot {
-  start: string;
-  end: string;
-  label: string;
-  current: boolean;
-}
-
-function isoOf(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
-}
-
-function monthEndOf(ym: string): string {
-  const [y, m] = ym.split('-').map(Number);
-  const d = new Date(y!, m!, 0);
-  return isoOf(d);
-}
-
-/** 生成时间格，覆盖 [今天 - past 月, 今天 + future 月] */
-function buildSlots(now: Date, granularity: string, monthsBack: number, monthsAhead: number): Slot[] {
-  const todayStr = today(now);
-  const slots: Slot[] = [];
-
-  if (granularity === 'year') {
-    const y0 = now.getFullYear() - Math.ceil(monthsBack / 12);
-    const y1 = now.getFullYear() + Math.ceil(monthsAhead / 12);
-    for (let y = y0; y <= y1; y += 1) {
-      slots.push({ start: `${y}-01-01`, end: `${y}-12-31`, label: `${y}`, current: y === now.getFullYear() });
-    }
-    return slots;
-  }
-
-  if (granularity === 'month') {
-    for (let i = -monthsBack; i <= monthsAhead; i += 1) {
-      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-      slots.push({
-        start: `${ym}-01`,
-        end: monthEndOf(ym),
-        label: ym,
-        current: d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth(),
-      });
-    }
-    return slots;
-  }
-
-  if (granularity === 'week') {
-    // 以本周一为基准，前后展开
-    const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    base.setDate(base.getDate() - ((base.getDay() + 6) % 7));
-    const back = Math.ceil((monthsBack * 30) / 7);
-    const ahead = Math.ceil((monthsAhead * 30) / 7);
-    for (let i = -back; i <= ahead; i += 1) {
-      const s = new Date(base);
-      s.setDate(s.getDate() + i * 7);
-      const e = new Date(s);
-      e.setDate(e.getDate() + 6);
-      const ss = isoOf(s);
-      const ee = isoOf(e);
-      slots.push({
-        start: ss,
-        end: ee,
-        label: `${ss.slice(5)}~${ee.slice(5)}`,
-        current: todayStr >= ss && todayStr <= ee,
-      });
-    }
-    return slots;
-  }
-
-  // day：以今天为中心，前后各展开半个月数
-  const span = Math.round(((monthsBack + monthsAhead) * 30) / 2);
-  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  for (let i = -span; i <= span; i += 1) {
-    const d = new Date(base);
-    d.setDate(d.getDate() + i);
-    const s = isoOf(d);
-    slots.push({ start: s, end: s, label: s.slice(5), current: s === todayStr });
-  }
-  return slots;
-}
-
-function slotIndexOf(date: string, slots: Slot[]): number {
-  for (let i = 0; i < slots.length; i += 1) {
-    const s = slots[i]!;
-    if (date >= s.start && date <= s.end) return i;
-  }
-  return -1;
-}
-
-/** 按 uuid 取一条物品，找不到就抛「未找到」 */
 function findItemByUuid(db: ReturnType<typeof openDatabase>, uuid: string): Row {
   const row = selectOne(db, 'items', 'uuid = ?', [uuid], { includeInternal: true });
   if (!row) throw new WorkspaceNotFoundError(`物品 ${uuid}`);

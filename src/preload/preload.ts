@@ -99,7 +99,7 @@ const api = {
   },
   /** 时间轴 */
   timeline: {
-    data: (wsId: string | null, opts?: Record<string, unknown>) => call('timeline:data', wsId, opts ?? null),
+    data: (wsId: string | null) => call('timeline:data', wsId),
   },
   io: {
     /** 传一个 id 或一组 id：多个时导出成多工作区包 */

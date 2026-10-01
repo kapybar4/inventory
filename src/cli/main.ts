@@ -19,6 +19,7 @@ import { resolve } from 'node:path';
 
 import { APP_NAME, APP_VERSION, APP_FORMAT, APP_FORMAT_VERSION } from '../core/meta';
 import { SCHEMA_VERSION } from '../core/schema';
+import { buildTimelineSlots, slotIndexOf } from '../core/timeline';
 import { bootstrapPath, clearBootstrap, writeBootstrap } from '../core/bootstrap';
 import { ENUMS, CATEGORY_LEAD_DAYS, TABLES } from '../core/fields';
 import { exportWorkspace, exportWorkspaces } from '../core/export';
@@ -100,7 +101,7 @@ import {
   resolveColumns,
 } from '../core/columns';
 import { applyItemOrder, nextItemCode } from '../core/db';
-import { formatDaysLeft, daysUntil, today, monthEnd } from '../core/dates';
+import { formatDaysLeft, daysUntil, today } from '../core/dates';
 import { seedWorkspace } from '../core/seed';
 import { buildManifest } from '../core/manifest';
 import { centsToYuan, yuanToCents, FieldError, mergeExtra, parseExtra, serializeExtra } from '../core/values';
@@ -2872,14 +2873,6 @@ function cmdGroupList(args: ParsedArgs, dataDir: string): number {
  */
 function cmdTimeline(args: ParsedArgs, dataDir: string): number {
   const entry = resolveWorkspace(dataDir, str(args, 'ws') ?? args._[0] ?? null);
-  const granularity = str(args, 'granularity') ?? 'month';
-  const allowed = ['day', 'week', 'month', 'year'];
-  if (!allowed.includes(granularity)) {
-    throw new ArgError(`粒度 "${granularity}" 不存在。可用: ${allowed.join(' / ')}`);
-  }
-
-  const monthsBack = num(args, 'past') ?? 6;
-  const monthsAhead = num(args, 'future') ?? 24;
 
   const db = openDatabase(workspaceDbPath(dataDir, entry), { readOnly: true });
   try {
@@ -2888,7 +2881,7 @@ function cmdTimeline(args: ParsedArgs, dataDir: string): number {
     const filtered = categoryFilter ? rows.filter((r) => String(r['category'] ?? '') === categoryFilter) : rows;
 
     const now = new Date();
-    const slots = buildSlots(now, granularity, monthsBack, monthsAhead);
+    const slots = buildTimelineSlots(now);
 
     // 分类分组（时间轴也按分类组织，界面可以过滤）
     const groups = groupByCategory(filtered, now);
@@ -2915,7 +2908,6 @@ function cmdTimeline(args: ParsedArgs, dataDir: string): number {
     const data = {
       workspaceId: entry.id,
       workspaceName: entry.name,
-      granularity,
       today: today(now),
       slots,
       categories: dated.map((g) => ({ key: g.key, label: g.label, count: g.entries.length + g.longTerm.length })),
@@ -2931,7 +2923,7 @@ function cmdTimeline(args: ParsedArgs, dataDir: string): number {
       return EXIT.OK;
     }
 
-    write(`${entry.name} —— 时间轴（粒度：${granularityLabel(granularity)}，共 ${slots.length} 格）`);
+    write(`${entry.name} —— 时间轴（按天，${slots[0]?.start ?? ''} ~ ${slots[slots.length - 1]?.end ?? ''}）`);
     write(`今天 ${data.today}`);
     for (const g of dated) {
       if (g.entries.length === 0) continue;
@@ -2954,107 +2946,6 @@ function cmdTimeline(args: ParsedArgs, dataDir: string): number {
   } finally {
     db.close();
   }
-}
-
-interface Slot {
-  /** 起点（含），YYYY-MM-DD */
-  start: string;
-  /** 终点（含） */
-  end: string;
-  label: string;
-  /** 是不是当前所在的这一格 */
-  current: boolean;
-}
-
-function granularityLabel(g: string): string {
-  return { day: '日', week: '周', month: '月', year: '年' }[g] ?? g;
-}
-
-/** 生成时间格，覆盖 [今天 - past, 今天 + future] */
-function buildSlots(now: Date, granularity: string, monthsBack: number, monthsAhead: number): Slot[] {
-  const todayStr = today(now);
-  const slots: Slot[] = [];
-
-  if (granularity === 'year') {
-    const y0 = now.getFullYear() - Math.ceil(monthsBack / 12);
-    const y1 = now.getFullYear() + Math.ceil(monthsAhead / 12);
-    for (let y = y0; y <= y1; y += 1) {
-      slots.push({
-        start: `${y}-01-01`,
-        end: `${y}-12-31`,
-        label: `${y}`,
-        current: y === now.getFullYear(),
-      });
-    }
-    return slots;
-  }
-
-  if (granularity === 'month') {
-    for (let i = -monthsBack; i <= monthsAhead; i += 1) {
-      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
-      const y = d.getFullYear();
-      const m = d.getMonth() + 1;
-      const mm = String(m).padStart(2, '0');
-      slots.push({
-        start: `${y}-${mm}-01`,
-        end: monthEnd(`${y}-${mm}`),
-        label: `${y}-${mm}`,
-        current: y === now.getFullYear() && m === now.getMonth() + 1,
-      });
-    }
-    return slots;
-  }
-
-  if (granularity === 'week') {
-    // 以本周一为基准，前后各展开
-    const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const dow = (base.getDay() + 6) % 7; // 周一 = 0
-    base.setDate(base.getDate() - dow);
-    const weeks = Math.ceil((monthsAhead * 30) / 7);
-    const back = Math.ceil((monthsBack * 30) / 7);
-    for (let i = -back; i <= weeks; i += 1) {
-      const s = new Date(base);
-      s.setDate(s.getDate() + i * 7);
-      const e = new Date(s);
-      e.setDate(e.getDate() + 6);
-      const ss = isoOf(s);
-      const ee = isoOf(e);
-      slots.push({
-        start: ss,
-        end: ee,
-        label: `${ss.slice(5)} ~ ${ee.slice(5)}`,
-        current: todayStr >= ss && todayStr <= ee,
-      });
-    }
-    return slots;
-  }
-
-  // day
-  const totalDays = (monthsBack + monthsAhead) * 30;
-  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  for (let i = -totalDays / 2; i <= totalDays / 2; i += 1) {
-    const d = new Date(base);
-    d.setDate(d.getDate() + i);
-    const s = isoOf(d);
-    slots.push({ start: s, end: s, label: s.slice(5), current: s === todayStr });
-  }
-  return slots;
-}
-
-function isoOf(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${dd}`;
-}
-
-/** 某个日期落在第几格；不在范围内返回 -1 */
-function slotIndexOf(date: string, slots: Slot[]): number {
-  for (let i = 0; i < slots.length; i += 1) {
-    const s = slots[i]!;
-    if (date >= s.start && date <= s.end) return i;
-  }
-  return -1;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -3713,13 +3604,10 @@ const COMMANDS: Command[] = [
   },
   {
     path: ['timeline'],
-    summary: '时间轴视图的数据：按粒度把到期时间分格',
-    usage: 'timeline [--granularity day|week|month|year] [--category <分类>] [--past N] [--future N]',
+    summary: '时间轴视图的数据：按天分格，范围是上周一 ~ 下下周日',
+    usage: 'timeline [--category <分类>]',
     options: [
-      { name: 'granularity', short: 'g', type: 'string', desc: '粒度，缺省 month', valueName: 'key' },
       { name: 'category', short: 'c', type: 'string', desc: '只看某个分类', valueName: 'key' },
-      { name: 'past', type: 'number', desc: '往前覆盖几个月，缺省 6', valueName: 'N' },
-      { name: 'future', type: 'number', desc: '往后覆盖几个月，缺省 24', valueName: 'N' },
     ],
     run: cmdTimeline,
   },

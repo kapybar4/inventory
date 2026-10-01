@@ -75,6 +75,7 @@ import { buildDdl, SCHEMA_VERSION } from '../core/schema';
 import { uuidv7, isUuid } from '../core/ids';
 import { buildManifest, validateManifest, CSV_CONVENTION } from '../core/manifest';
 import { zipDirectory, unzipTo } from '../core/zip';
+import { buildTimelineSlots, slotIndexOf } from '../core/timeline';
 import {
   buildTree,
   sortItems,
@@ -2561,3 +2562,106 @@ function readdirNames(dir: string): string[] {
 
 void transaction;
 void insertRow;
+
+// ─────────────────────────────────────────────────────────────
+// 时间轴：范围固定、按天、标注规则
+// ─────────────────────────────────────────────────────────────
+
+/** 星期几：0=周日，1=周一 */
+function weekdayOf(iso: string): number {
+  return new Date(`${iso}T00:00:00`).getDay();
+}
+
+test('时间轴：范围是上周一 ~ 下下周日，共 28 格且每格一天', () => {
+  // 用固定日期，别用 new Date() —— 否则跑的日子不同断言就飘
+  // 2026-10-02 是周五
+  const slots = buildTimelineSlots(new Date(2026, 9, 2));
+  assert.equal(slots.length, 28, '4 周 × 7 天');
+  assert.equal(weekdayOf(slots[0]!.start), 1, '起点必须是周一');
+  assert.equal(weekdayOf(slots[27]!.end), 0, '终点必须是周日');
+  assert.equal(slots[0]!.start, '2026-09-21', '上周一');
+  assert.equal(slots[27]!.end, '2026-10-18', '下下周日');
+  for (const s of slots) {
+    assert.equal(s.start, s.end, '按天：起点终点是同一天');
+  }
+  // 日期连续，不跳也不重
+  for (let i = 1; i < slots.length; i += 1) {
+    const prev = new Date(`${slots[i - 1]!.start}T00:00:00`);
+    const cur = new Date(`${slots[i]!.start}T00:00:00`);
+    assert.equal(
+      Math.round((cur.getTime() - prev.getTime()) / 86400000),
+      1,
+      `${slots[i - 1]!.start} → ${slots[i]!.start} 应当正好差一天`,
+    );
+  }
+});
+
+test('时间轴：只有一格标成今天，且标的就是今天', () => {
+  const slots = buildTimelineSlots(new Date(2026, 9, 2));
+  const todays = slots.filter((s) => s.current);
+  assert.equal(todays.length, 1, '有且只有一格是今天');
+  assert.equal(todays[0]!.start, '2026-10-02');
+  assert.equal(todays[0]!.labelKind, 'today');
+  assert.match(todays[0]!.label, /今天/, '今天那格要写明');
+});
+
+/**
+ * 标注规则是这次需求里最容易做错的一条，所以逐条钉住。
+ *
+ * 需求原话：只在当天以及每周的开始和结束时标注日期，
+ * 对于连续两周的结束和开始，只标注相邻周的下一周的开始时间。
+ * 也就是：**周末永远不标**，衔接处只留下一个日期（下一周的周一）。
+ */
+test('时间轴：只标今天 / 周一 / 月初，周末永远不标', () => {
+  // 换几个不同的"今天"跑，覆盖跨月、跨年、今天是周一周日等情况
+  const samples = [
+    new Date(2026, 9, 2), // 周五
+    new Date(2026, 9, 5), // 周一（今天自己就是一周开始）
+    new Date(2026, 9, 4), // 周日（今天自己就是周末）
+    new Date(2026, 11, 31), // 跨年
+    new Date(2027, 1, 28), // 平年二月底
+  ];
+  for (const now of samples) {
+    const slots = buildTimelineSlots(now);
+    for (const s of slots) {
+      const day = weekdayOf(s.start);
+      if (!s.label) continue;
+      const isMonday = day === 1;
+      const isFirstOfMonth = s.start.slice(8) === '01';
+      assert.ok(
+        s.current || isMonday || isFirstOfMonth,
+        `${s.start} 被标了「${s.label}」，但它既不是今天也不是周一/月初`,
+      );
+      /*
+       * 周末不标 —— 但只针对**周边界**。
+       *
+       * 「一周的结束"只标下一周的开始"」这条说的是周与周的衔接：
+       * 周日和紧邻的周一都标出来会挤在一起，而"这周到哪天"能从
+       * "下个周一是哪天"推出来。
+       *
+       * 月初是另一回事：它跟周边界没关系，落在周末也照标，
+       * 否则横轴跨月时就看不出来了（2026-10-04 正好是周日 + 10 月 1 日）。
+       */
+      if (s.labelKind === 'week') {
+        assert.ok(day !== 0 && day !== 6, `${s.start} 是周末，不该被标成一周的开始`);
+      }
+    }
+    // 每一个周一都必须算作"一周的开始" —— 这是"每周的开始"那一半需求。
+    // 注意今天恰好是周一时，那格的 labelKind 是 'today'，
+    // 但它仍然要满足 weekStart。
+    const mondays = slots.filter((s) => weekdayOf(s.start) === 1);
+    const weekStarts = slots.filter((s) => s.weekStart);
+    assert.equal(weekStarts.length, mondays.length, '每个周一都要算一周的开始');
+  }
+});
+
+test('时间轴：每一个标注日都唯一、可查，范围外的日期给 -1', () => {
+  const slots = buildTimelineSlots(new Date(2026, 9, 2));
+  assert.equal(slotIndexOf('2026-09-21', slots), 0, '第一天');
+  assert.equal(slotIndexOf('2026-10-02', slots), 11, '今天在正中间偏后');
+  assert.equal(slotIndexOf('2026-10-18', slots), 27, '最后一天');
+  assert.equal(slotIndexOf('2026-09-20', slots), -1, '范围前一天');
+  assert.equal(slotIndexOf('2026-10-19', slots), -1, '范围后一天');
+  assert.equal(slotIndexOf('2020-01-01', slots), -1, '很远的过去');
+});
+

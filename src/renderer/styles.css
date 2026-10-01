@@ -850,6 +850,43 @@ td.clickable:hover .link {
   letter-spacing: 0.6px;
 }
 
+/*
+ * 固定范围提示（上周一 ~ 下下周日）。
+ * 取代了原来的粒度选择器 —— 那只剩一种可选项，留着是噪音。
+ */
+.tl-range {
+  color: var(--fg-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-1);
+}
+
+/*
+ * 横轴上的三种标注。
+ *
+ * 只在今天、每周开始、月初写字，其余格子留白 —— 28 个日期全写出来
+ * 会挤成一片。但**格线照画**，每一格代表一天这件事不变；
+ * 想知道没标字的那格是哪天，悬停即可（title 里带着）。
+ */
+.tl-slot-head.tl-slot-week {
+  color: var(--fg-dim);
+  font-weight: 600;
+}
+
+.tl-slot-head.tl-slot-month {
+  color: var(--info);
+  font-weight: 600;
+}
+
+.tl-slot-head.tl-slot-today,
+.tl-slot-head.tl-today {
+  color: var(--accent);
+  font-weight: 700;
+}
+
 .tl-hint {
   margin-left: auto;
   color: var(--fg-dim);
@@ -973,9 +1010,17 @@ td.clickable:hover .link {
   font-size: 11px;
   color: var(--fg-faint);
   font-variant-numeric: tabular-nums;
-  text-align: center;
+  /*
+   * 标注比格子宽（「今天 10-02」约 62px，格子只有 34px），
+   * 所以**不能裁也不能居中**：居中会把两端各切掉一截，
+   * 第一列的「09-21」就是这么变成「09-2:」的。
+   * 改成左对齐 + 允许溢出，让它往右边的空格子铺 ——
+   * 下一个标注离得远（最短也隔一周），不会撞上。
+   */
+  text-align: left;
   white-space: nowrap;
-  overflow: hidden;
+  overflow: visible;
+  z-index: 1;
 }
 
 .tl-slot {
