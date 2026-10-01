@@ -35,7 +35,12 @@ app.whenReady().then(() => {
     async function ev(label, code) {
       current = label;
       try {
-        results[label] = await win.webContents.executeJavaScript(`(async () => { ${code} })()`);
+        // 每步单独限时：某一步挂起时不能把整轮探针拖死，
+        // 否则只能拿到一个「卡在某处」而不知道后面还有没有问题
+        results[label] = await Promise.race([
+          win.webContents.executeJavaScript(`(async () => { ${code} })()`),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('这一步挂起超过 20 秒')), 20000)),
+        ]);
       } catch (err) {
         const msg = String(err && err.message ? err.message : err);
         failed.push({ label, error: msg });

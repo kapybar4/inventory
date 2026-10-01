@@ -5,7 +5,7 @@
  * 数量对不对、顺序对不对、边界行为是否符合设计。
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -1395,6 +1395,182 @@ check('过保物品仍算「有到期日」，不是长期', () => {
     ok(warrantyOnly.warrantyUntil, '但有质保到期日');
   }
   return `longTerm=${digital.longTerm} warranty=${digital.warranty}`;
+});
+
+// ═════════════════════════════════════════════════════════════
+// 14. 多工作区导出 / 导入 / 异常隔离
+// ═════════════════════════════════════════════════════════════
+
+section('14. 多工作区与异常隔离');
+
+const multiZip = join(ROOT, 'multi.zip');
+
+check('只选一个工作区：导出保持单工作区结构', () => {
+  const one = join(ROOT, 'single.zip');
+  const r = json(['export', '--ws', '我的家', '-o', one]);
+  eq(r.code, 0, '退出码');
+  eq(r.data.data.multi, false, '不是多工作区包');
+  eq(r.data.data.workspaceName, '我的家', '工作区名');
+  // 单工作区包可以直接预演成"将创建一个工作区"
+  const pv = json(['import', one, '--dry-run']).data.data;
+  eq(pv.multi, undefined, '预演结果里没有 multi 标记');
+  eq(pv.workspaceName, '我的家', '预演出的名字');
+  return '单工作区格式';
+});
+
+check('选多个工作区：导出一份多工作区包', () => {
+  const r = json(['export', '--ws', '我的家', '--ws', '父母家', '-o', multiZip]);
+  eq(r.code, 0, '退出码');
+  eq(r.data.data.multi, true, '是多工作区包');
+  eq(r.data.data.workspaceCount, 2, '两个工作区');
+  eq(r.data.data.workspaces.map((w) => w.name).join(','), '我的家,父母家', '顺序保持');
+  return `${r.data.data.fileCount} 个文件`;
+});
+
+check('--ws 可重复，也可逗号分隔', () => {
+  const a = json(['export', '--ws', '我的家', '--ws', '父母家', '-o', join(ROOT, 'a.zip')]).data.data;
+  const b = json(['export', '--ws', '我的家,父母家', '-o', join(ROOT, 'b.zip')]).data.data;
+  eq(b.workspaceCount, 2, '逗号分隔也认');
+  eq(a.workspaceCount, b.workspaceCount, '两种写法结果一致');
+  return '2 种写法';
+});
+
+check('同一个工作区写两遍会被去重', () => {
+  const r = json(['export', '--ws', '我的家', '--ws', '我的家', '-o', join(ROOT, 'dup.zip')]).data.data;
+  eq(r.multi, false, '去重后只剩一个 → 走单工作区格式');
+  return 'dedup';
+});
+
+check('多工作区包预演能列出全部子工作区', () => {
+  const d = json(['import', multiZip, '--dry-run']).data.data;
+  eq(d.multi, true, '识别为多工作区包');
+  eq(d.workspaceCount, 2, '两个');
+  eq(d.workspaces.map((w) => w.dir).join(','), '我的家,父母家', '目录名');
+  return d.workspaces.map((w) => w.name).join(',');
+});
+
+check('导入多工作区包：分别新建多个工作区', () => {
+  const before = json(['ws', 'list']).data.data.count;
+  const r = json(['import', multiZip, '--name', '批次']);
+  eq(r.code, 0, '退出码');
+  eq(r.data.data.multi, true, '多工作区');
+  eq(r.data.data.total, 2, '共 2 个');
+  eq(r.data.data.succeeded, 2, '全部成功');
+  eq(r.data.data.failed, 0, '没有失败');
+  const after = json(['ws', 'list']).data.data.count;
+  eq(after, before + 2, `工作区数应 +2（${before} → ${after}）`);
+  const names = json(['ws', 'list']).data.data.workspaces.map((w) => w.name);
+  ok(names.includes('批次-我的家') && names.includes('批次-父母家'), `应有带前缀的两个，实际: ${names.join(', ')}`);
+  return `${before} → ${after}`;
+});
+
+check('多工作区导入的数据与源一致', () => {
+  const src = json(['item', 'list', '--all', '--ws', '我的家']).data.data.items;
+  const dst = json(['item', 'list', '--all', '--ws', '批次-我的家']).data.data.items;
+  eq(dst.length, src.length, '行数一致');
+  const pick = (list) => list.map((i) => `${i.name}|${i.category}|${i.remaining}|${i.expiresOn}`).sort().join('\n');
+  eq(pick(dst), pick(src), '关键字段逐条一致');
+  return `${dst.length} 条`;
+});
+
+check('导入不存在的多工作区包 → 退出码 4', () => {
+  eq(cli(['import', join(ROOT, '不存在.zip')]).code, 4, '退出码');
+  return 'exit 4';
+});
+
+check('ws list 报出可用状态', () => {
+  const d = json(['ws', 'list']).data.data;
+  ok(typeof d.abnormal === 'number', '应有异常计数');
+  eq(d.abnormal, 0, '现在都正常');
+  const w = d.workspaces[0];
+  eq(w.status, 'ok', '状态字段');
+  eq(w.usable, true, '可用');
+  return `${d.count} 个工作区，异常 ${d.abnormal}`;
+});
+
+check('隔离后读写被拒绝（退出码 3）', () => {
+  const r = json(['ws', 'quarantine', '父母家', '--reason', '功能测试']);
+  eq(r.code, 0, '标记成功');
+  eq(r.data.data.status, 'quarantined', '状态');
+
+  const read = cli(['item', 'list', '--ws', '父母家']);
+  eq(read.code, 3, '读被拒绝');
+  ok(/异常|禁止读写/.test(read.err), `报错要能看懂：${read.err.trim().slice(0, 80)}`);
+
+  const write = cli(['item', 'add', '--name', '不该写进去', '-c', 'daily', '--ws', '父母家']);
+  eq(write.code, 3, '写被拒绝');
+  return 'exit 3';
+});
+
+check('隔离后导出仍然可用（这是恢复路径）', () => {
+  const out = join(ROOT, 'quarantined.zip');
+  const r = json(['export', '--ws', '父母家', '-o', out]);
+  eq(r.code, 0, '导出成功');
+  ok(existsSync(out), '归档生成了');
+  return '可导出';
+});
+
+check('ws list 显示异常工作区与原因', () => {
+  const d = json(['ws', 'list']).data.data;
+  eq(d.abnormal, 1, '一个异常');
+  const bad = d.workspaces.find((w) => w.name === '父母家');
+  eq(bad.status, 'quarantined', '状态');
+  eq(bad.usable, false, '不可用');
+  eq(bad.statusReason, '功能测试', '原因');
+  // 异常工作区不去读它的库，统计留空
+  eq(bad.items, null, '物品数不统计');
+  return bad.statusReason;
+});
+
+check('隔离的包导出后仍能正常导入（数据没坏）', () => {
+  const r = json(['import', join(ROOT, 'quarantined.zip'), '--name', '抢救回来']);
+  eq(r.code, 0, '退出码');
+  const list = json(['item', 'list', '--all', '--ws', '抢救回来']).data.data.items;
+  ok(list.length > 0, '数据在');
+  return `${list.length} 条`;
+});
+
+check('恢复路径：导出 → 删除 → 重新导入', () => {
+  const out = join(ROOT, 'recover.zip');
+  eq(json(['export', '--ws', '父母家', '-o', out]).code, 0, '1 导出');
+  eq(cli(['ws', 'rm', '父母家', '--yes']).code, 0, '2 删除');
+  eq(json(['ws', 'list']).data.data.abnormal, 0, '删掉之后没有异常工作区了');
+  const back = json(['import', out, '--name', '父母家']);
+  eq(back.code, 0, '3 重新导入');
+  const w = json(['ws', 'list']).data.data.workspaces.find((x) => x.name === '父母家');
+  eq(w.status, 'ok', '新的是正常的');
+  ok(json(['item', 'list', '--all', '--ws', '父母家']).data.data.items.length > 0, '数据回来了');
+  return '三步走通';
+});
+
+check('解除隔离前会先自检', () => {
+  json(['ws', 'quarantine', '我的家', '--reason', '待解除']);
+  const r = json(['ws', 'unquarantine', '我的家']);
+  eq(r.code, 0, '数据没问题，可以解除');
+  eq(r.data.data.status, 'ok', '状态回到正常');
+  eq(r.data.data.previousReason, '待解除', '带出原原因');
+  return 'ok';
+});
+
+check('导入未完成（importing）的工作区也被拦住', () => {
+  // 模拟"导入跑到一半宕机"：注册表里留下 importing
+  const regPath = join(HOME, 'registry.json');
+  const reg = JSON.parse(readFileSync(regPath, 'utf8'));
+  const target = reg.workspaces.find((w) => w.name === '我的家');
+  target.status = 'importing';
+  target.statusReason = '导入尚未完成';
+  writeFileSync(regPath, JSON.stringify(reg, null, 2), 'utf8');
+
+  const read = cli(['item', 'list', '--ws', '我的家']);
+  eq(read.code, 3, '读取被拒绝');
+  ok(/导入没有完成|导入尚未完成/.test(read.err), `提示要说清是导入没完成：${read.err.trim().slice(0, 100)}`);
+
+  const w = json(['ws', 'list']).data.data.workspaces.find((x) => x.name === '我的家');
+  eq(w.usable, false, '不可用');
+  // 收尾：恢复正常
+  json(['ws', 'unquarantine', '我的家']);
+  eq(json(['ws', 'list']).data.data.abnormal, 0, '恢复正常');
+  return 'exit 3';
 });
 
 // ═════════════════════════════════════════════════════════════

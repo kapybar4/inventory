@@ -41,14 +41,27 @@ function camelize(raw: string): string {
 export function parseArgv(argv: string[], specs: OptionSpec[]): ParsedArgs {
   const byLong = new Map<string, OptionSpec>();
   const byShort = new Map<string, OptionSpec>();
+  /**
+   * 同名选项：**先出现的赢**。
+   *
+   * 调用方传的是 `[...cmd.options, ...GLOBAL_OPTIONS]`，而 `ws` 两边都有。
+   * 命令自己的声明必须压过全局那份 —— 否则 `export --ws a --ws b` 里
+   * 命令声明的 `multiple: true` 会被全局的普通 `ws` 覆盖掉，
+   * 只剩最后一个值，而且**一声不响**。这个坑真踩过。
+   */
   for (const s of specs) {
-    byLong.set(s.name, s);
-    byLong.set(camelize(s.name), s);
-    if (s.short) byShort.set(s.short, s);
+    if (!byLong.has(s.name)) byLong.set(s.name, s);
+    const camel = camelize(s.name);
+    if (!byLong.has(camel)) byLong.set(camel, s);
+    if (s.short && !byShort.has(s.short)) byShort.set(s.short, s);
   }
 
   const out: ParsedArgs = { _: [] };
+  // 初始化也不能覆盖：同一个 name 只认最先出现的那个 spec
+  const initialized = new Set<string>();
   for (const s of specs) {
+    if (initialized.has(s.name)) continue;
+    initialized.add(s.name);
     if (s.default !== undefined) out[s.name] = s.default;
     else if (s.type === 'boolean') out[s.name] = false;
   }

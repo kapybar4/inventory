@@ -27,6 +27,12 @@ import {
   workspaceDbPath,
   workspaceStats,
   WorkspaceNotFoundError,
+  WorkspaceUnusableError,
+  assertUsable,
+  isUsable,
+  workspaceStatus,
+  quarantineWorkspace,
+  unquarantineWorkspace,
   defaultDataDir,
 } from '../core/workspace';
 import {
@@ -67,8 +73,8 @@ import {
   consumeFromStocks,
   hasStocks,
 } from '../core/bulk';
-import { exportWorkspace } from '../core/export';
-import { importArchive, previewArchive } from '../core/import';
+import { exportWorkspace, exportWorkspaces } from '../core/export';
+import { importArchive, importAnything, previewArchive, detectMultiArchive } from '../core/import';
 import { seedWorkspace } from '../core/seed';
 import { buildManifest } from '../core/manifest';
 import { formatDaysLeft, daysUntil, today } from '../core/dates';
@@ -187,6 +193,9 @@ function handle(channel: string, fn: Handler): void {
           name: e.name || 'Error',
           message: e.message,
           notFound: e instanceof WorkspaceNotFoundError,
+          // 界面靠这个标记区分"找不到"和"坏了" —— 后者要显示修复指引
+          unusable: e instanceof WorkspaceUnusableError,
+          status: e instanceof WorkspaceUnusableError ? e.status : undefined,
         },
       };
     }
@@ -278,9 +287,24 @@ function decorateItem(r: Row, counts: Map<string, number>): DecoratedItem {
   };
 }
 
-function withDb<T>(wsId: string | null, readOnly: boolean, fn: (db: ReturnType<typeof openDatabase>, entry: ReturnType<typeof requireWorkspace>) => T): T {
+/**
+ * 开库并执行。**这里是异常工作区的唯一闸门。**
+ *
+ * 调用方要用一个不可用的工作区做读写，就会在这里被 `assertUsable` 挡下，
+ * 抛 `WorkspaceUnusableError`，界面据此显示"这个工作区坏了"。
+ *
+ * `allowUnusable` 只给**导出**用：恢复路径是"导出备份 → 重建 → 删掉坏的"，
+ * 把导出也堵上等于把人锁在门外，数据就拿不出来了。
+ */
+function withDb<T>(
+  wsId: string | null,
+  readOnly: boolean,
+  fn: (db: ReturnType<typeof openDatabase>, entry: ReturnType<typeof requireWorkspace>) => T,
+  opts: { allowUnusable?: boolean } = {},
+): T {
   const dd = dataDir();
   const entry = resolveWorkspace(dd, wsId);
+  if (!opts.allowUnusable) assertUsable(entry);
   const db = openDatabase(workspaceDbPath(dd, entry), readOnly ? { readOnly: true, skipMigrate: true } : {});
   try {
     return fn(db, entry);
@@ -387,6 +411,8 @@ function registerHandlers(): void {
       workspaces: reg.workspaces
         .filter((w) => !w.archived)
         .map((w) => {
+          const status = workspaceStatus(w);
+          const usable = isUsable(w);
           let items: number | null = null;
           let moves: number | null = null;
           let purgeable = 0;
@@ -401,19 +427,22 @@ function registerHandlers(): void {
           } catch {
             /* 目录被手工删掉时不让整个列表崩掉 */
           }
-          // 「可一键清理」= 非批量且剩余为 0 的记录数
-          try {
-            const db = openDatabase(workspaceDbPath(dd, w), { readOnly: true });
+          // 「可一键清理」= 非批量且剩余为 0 的记录数。
+          // 异常工作区不去读它的库 —— 状态都不对了，数字也不可信
+          if (usable) {
             try {
-              const row = db
-                .prepare('SELECT COUNT(*) AS n FROM items WHERE is_bulk = 0 AND remaining <= 0')
-                .get() as { n: number } | undefined;
-              purgeable = Number(row?.n ?? 0);
-            } finally {
-              db.close();
+              const db = openDatabase(workspaceDbPath(dd, w), { readOnly: true });
+              try {
+                const row = db
+                  .prepare('SELECT COUNT(*) AS n FROM items WHERE is_bulk = 0 AND remaining <= 0')
+                  .get() as { n: number } | undefined;
+                purgeable = Number(row?.n ?? 0);
+              } finally {
+                db.close();
+              }
+            } catch {
+              purgeable = 0;
             }
-          } catch {
-            purgeable = 0;
           }
           return {
             id: w.id,
@@ -429,10 +458,21 @@ function registerHandlers(): void {
             purgeable,
             dbBytes,
             integrityOk,
+            /** 'ok' | 'importing' | 'quarantined'。界面据此禁止操作并显示修复指引 */
+            status,
+            usable,
+            statusReason: w.statusReason ?? null,
+            statusAt: w.statusAt ?? null,
           };
         }),
     };
   });
+
+  // 手动隔离 / 解除隔离
+  handle('ws:quarantine', (id, reason) =>
+    quarantineWorkspace(dataDir(), asString(id, 'id'), String(reason ?? '用户手动标记')),
+  );
+  handle('ws:unquarantine', (id) => unquarantineWorkspace(dataDir(), asString(id, 'id')));
 
   handle('ws:create', (name, seed) => {
     const dd = dataDir();
@@ -1165,23 +1205,57 @@ function registerHandlers(): void {
   });
 
   // ── 导入导出 ──
-  handle('io:export', async (wsId) => {
+  /**
+   * 导出：支持多选。
+   *
+   *   - 选 1 个 → 单工作区归档（根目录就是数据），文件名默认 `<名字>.zip`
+   *   - 选多个 → 多工作区归档（`workspaces/<名字>/…`），默认 `多工作区-<时间>.zip`
+   *
+   * 两种结构不同但都能被 `io:import` 认出来。**异常工作区也允许导出** ——
+   * 这正是拿回数据的唯一途径。
+   */
+  handle('io:export', async (wsIds) => {
     const dd = dataDir();
-    const entry = wsId ? requireWorkspace(dd, asString(wsId, 'wsId')) : resolveWorkspace(dd, null);
-    const safe = entry.name.replace(/[\\/:*?"<>|]/g, '_');
+    const ids = Array.isArray(wsIds)
+      ? (wsIds as unknown[]).map((x) => asString(x, 'wsId'))
+      : [asString(wsIds, 'wsId')];
+
+    const entries = ids.map((id) => requireWorkspace(dd, id));
+    const multi = entries.length > 1;
+    const safe = (s: string): string => s.replace(/[\\/:*?"<>|]/g, '_');
+
     const result = await dialog.showSaveDialog({
-      title: '导出工作区',
-      defaultPath: join(app.getPath('documents'), `${safe}.zip`),
+      title: multi ? `导出 ${entries.length} 个工作区` : '导出工作区',
+      defaultPath: join(
+        app.getPath('documents'),
+        multi ? `多工作区-${entries.length}个.zip` : `${safe(entries[0]!.name)}.zip`,
+      ),
       filters: [{ name: 'DSH Inventory 归档', extensions: ['zip'] }],
     });
     if (result.canceled || !result.filePath) return { canceled: true };
-    const out = exportWorkspace(dd, entry, { outPath: result.filePath });
+
+    if (!multi) {
+      const out = exportWorkspace(dd, entries[0]!, { outPath: result.filePath });
+      return {
+        canceled: false,
+        multi: false,
+        archivePath: out.archivePath,
+        bytesText: formatBytes(out.bytes),
+        fileCount: out.fileCount,
+        rowCounts: out.rowCounts,
+        workspaces: [{ id: out.workspace.id, name: out.workspace.name }],
+      };
+    }
+
+    const out = exportWorkspaces(dd, entries, { outPath: result.filePath });
     return {
       canceled: false,
+      multi: true,
       archivePath: out.archivePath,
       bytesText: formatBytes(out.bytes),
       fileCount: out.fileCount,
-      rowCounts: out.rowCounts,
+      rowCounts: {},
+      workspaces: out.workspaces.map((w) => ({ id: w.id, name: w.name })),
     };
   });
 
@@ -1192,9 +1266,23 @@ function registerHandlers(): void {
       filters: [{ name: 'DSH Inventory 归档', extensions: ['zip'] }],
     });
     if (picked.canceled || picked.filePaths.length === 0) return { canceled: true };
+
+    // 多工作区包没有单工作区的 manifest 结构，先探一下再决定怎么预览
+    const detected = detectMultiArchive(picked.filePaths[0]!);
+    if (detected.multi) {
+      return {
+        canceled: false,
+        multi: true,
+        archivePath: picked.filePaths[0]!,
+        workspaceCount: detected.workspaces.length,
+        workspaces: detected.workspaces,
+      };
+    }
+
     const preview = previewArchive(picked.filePaths[0]!);
     return {
       canceled: false,
+      multi: false,
       archivePath: picked.filePaths[0]!,
       workspaceName: preview.workspaceName,
       exportedAt: preview.manifest.exportedAt,
@@ -1209,18 +1297,27 @@ function registerHandlers(): void {
     };
   });
 
+  /**
+   * 导入。单工作区与多工作区自动识别：多工作区包会**分别新建多个工作区**。
+   *
+   * 一个失败不影响其余；失败的会被隔离，`items[].error` 里带着原因。
+   */
   handle('io:import', (archivePath, name) => {
     const dd = dataDir();
     const opts: Parameters<typeof importArchive>[1] = { dataDir: dd };
     if (typeof name === 'string' && name.trim()) opts.name = name.trim();
-    const result = importArchive(asString(archivePath, 'archivePath'), opts);
+    const r = importAnything(asString(archivePath, 'archivePath'), opts);
     return {
-      ok: result.ok,
-      workspaceId: result.workspaceId,
-      workspaceName: result.workspaceName,
-      rowCounts: result.rowCounts,
-      errorCount: result.preview.errorCount,
-      issues: result.preview.issues.slice(0, 100),
+      ok: r.ok,
+      multi: r.multi,
+      total: r.total,
+      succeeded: r.succeeded,
+      failed: r.failed,
+      items: r.items,
+      // 兼容老界面：单工作区时把第一个结果摊平上来
+      workspaceId: r.items[0]?.workspaceId ?? null,
+      workspaceName: r.items[0]?.name ?? '',
+      rowCounts: r.items[0]?.rowCounts ?? {},
     };
   });
 

@@ -33,6 +33,21 @@ import { SCHEMA_VERSION } from './schema';
 export const REGISTRY_FORMAT = 'dsh-inventory-registry';
 export const REGISTRY_VERSION = 1;
 
+/**
+ * 工作区可用状态。
+ *
+ *   - `ok`          正常
+ *   - `importing`   正在导入。**进程没走到最后一步就把这个状态留在了注册表里**，
+ *                   所以它就是"上次导入没跑完"的证据（宕机、断电、被强杀）。
+ *   - `quarantined` 已隔离。数据被判定坏了，**禁止一切读写**。
+ *
+ * 为什么要单独一个状态而不是"发现了再说"：
+ * 半途中断的导入可能留下一半的行，而 SQLite 本身完全健康（transaction 只覆盖
+ * 写库那一段，附件拷贝、报告写入都在事务外）。光靠 integrity_check 查不出来，
+ * 必须有一个持久化的标记来说明"这件事没做完"。
+ */
+export type WorkspaceStatus = 'ok' | 'importing' | 'quarantined';
+
 export interface WorkspaceEntry {
   id: string;
   name: string;
@@ -46,6 +61,18 @@ export interface WorkspaceEntry {
   schemaVersion: number;
   archived?: boolean;
   notes?: string;
+  /**
+   * 可用状态。缺省视为 `ok`（老注册表里没有这个字段）。
+   *
+   * 一旦不是 `ok`，`withDb` 会拒绝一切读写 —— 只有一个例外：**导出**。
+   * 因为恢复路径就是"导出备份 → 重建 → 删掉坏的"，把导出也堵上等于把人锁在门外。
+   */
+  status?: WorkspaceStatus;
+  /** 为什么被标为异常。给人看的，会显示在界面和 `ws list` 上。 */
+  statusReason?: string;
+  /** 什么时候标的 */
+  statusAt?: string;
+
   /**
    * 分组顺序：父路径 → 该父级下的有序 key 列表。
    *
@@ -205,8 +232,120 @@ export class WorkspaceNotFoundError extends Error {
   }
 }
 
-/** 未指定时用 active，再退回唯一的一个，或第一个 */
-export function resolveWorkspace(dataDir: string, idOrName?: string | null): WorkspaceEntry {
+/**
+ * 工作区被隔离，禁止读写。
+ *
+ * 单独一个错误类型是为了让调用方能区分"找不到"和"坏了" ——
+ * 界面要显示的是后者，而且要给出一条出路（导出备份 → 重建 → 删除）。
+ */
+export class WorkspaceUnusableError extends Error {
+  constructor(
+    public readonly workspaceId: string,
+    public readonly workspaceName: string,
+    public readonly status: Exclude<WorkspaceStatus, 'ok'>,
+    public readonly reason: string,
+  ) {
+    super(
+      status === 'importing'
+        ? `工作区「${workspaceName}」上次导入没有完成，已锁定以免写入残缺数据。` +
+            `请重新导入，或导出后删除重建。原因: ${reason}`
+        : `工作区「${workspaceName}」已被标记为异常，禁止读写。` +
+            `请先导出备份，然后删除它并重新导入。原因: ${reason}`,
+    );
+    this.name = 'WorkspaceUnusableError';
+  }
+}
+
+/** 这个工作区是不是可用（缺省字段一律视为可用） */
+export function workspaceStatus(entry: WorkspaceEntry): WorkspaceStatus {
+  return entry.status ?? 'ok';
+}
+
+export function isUsable(entry: WorkspaceEntry): boolean {
+  return workspaceStatus(entry) === 'ok';
+}
+
+/**
+ * 读写前的一道闸：不可用就抛。
+ *
+ * **不在这里挡导出** —— 导出是自己的调用点，它会显式跳过这个检查。
+ * 把"允许导出"写成参数而不是默认放行，是为了让"哪些操作能在坏工作区上做"
+ * 这件事只有一个答案，不用去猜每条路径的意图。
+ */
+export function assertUsable(entry: WorkspaceEntry): void {
+  const st = workspaceStatus(entry);
+  if (st === 'ok') return;
+  throw new WorkspaceUnusableError(
+    entry.id,
+    entry.name,
+    st,
+    entry.statusReason ?? '未记录原因',
+  );
+}
+
+/** 标记为隔离 */
+export function quarantineWorkspace(
+  dataDir: string,
+  id: string,
+  reason: string,
+): WorkspaceEntry {
+  return setWorkspaceStatus(dataDir, id, 'quarantined', reason);
+}
+
+/** 解除隔离（用户确认数据没问题时用；正常恢复路径是重建） */
+export function unquarantineWorkspace(dataDir: string, id: string): WorkspaceEntry {
+  return setWorkspaceStatus(dataDir, id, 'ok', '');
+}
+
+/** 标记为"正在导入"。导入成功后才置回 ok */
+export function markImporting(dataDir: string, id: string): WorkspaceEntry {
+  return setWorkspaceStatus(dataDir, id, 'importing', '导入尚未完成');
+}
+
+export function setWorkspaceStatus(
+  dataDir: string,
+  id: string,
+  status: WorkspaceStatus,
+  reason: string,
+): WorkspaceEntry {
+  const reg = readRegistry(dataDir);
+  const entry = reg.workspaces.find((w) => w.id === id);
+  if (!entry) throw new WorkspaceNotFoundError(id);
+
+  if (status === 'ok') {
+    delete entry.status;
+    delete entry.statusReason;
+    delete entry.statusAt;
+  } else {
+    entry.status = status;
+    entry.statusReason = reason;
+    entry.statusAt = nowIso();
+  }
+
+  writeRegistry(dataDir, reg);
+  return entry;
+}
+
+/**
+ * 未指定时用 active，再退回唯一的一个，或第一个。
+ *
+ * **默认会拒绝不可用的工作区** —— 闸门放在这里而不是各个调用点，是因为
+ * 这里有几十个调用者，靠"每个都记得加一句检查"迟早会漏。真需要绕过
+ * （导出、删除、解除隔离）就显式传 `allowUnusable`，让"哪些操作能在坏工作区上做"
+ * 这件事在代码里一眼可数。
+ */
+export function resolveWorkspace(
+  dataDir: string,
+  idOrName?: string | null,
+  opts: { allowUnusable?: boolean } = {},
+): WorkspaceEntry {
+  const entry = pickWorkspace(dataDir, idOrName);
+  if (!opts.allowUnusable) assertUsable(entry);
+  return entry;
+}
+
+/** 只挑选、不检查可用性。给"必须能在坏工作区上做"的操作用 */
+export function pickWorkspace(dataDir: string, idOrName?: string | null): WorkspaceEntry {
   if (idOrName) return requireWorkspace(dataDir, idOrName);
   const reg = readRegistry(dataDir);
   if (reg.activeWorkspaceId) {

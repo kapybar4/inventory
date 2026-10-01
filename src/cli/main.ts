@@ -20,8 +20,14 @@ import { resolve } from 'node:path';
 import { APP_NAME, APP_VERSION, APP_FORMAT, APP_FORMAT_VERSION } from '../core/meta';
 import { SCHEMA_VERSION } from '../core/schema';
 import { ENUMS, CATEGORY_LEAD_DAYS } from '../core/fields';
-import { exportWorkspace } from '../core/export';
-import { importArchive, previewArchive, type ImportPreview } from '../core/import';
+import { exportWorkspace, exportWorkspaces } from '../core/export';
+import {
+  importArchive,
+  importAnything,
+  previewArchive,
+  detectMultiArchive,
+  type ImportPreview,
+} from '../core/import';
 import {
   createWorkspace,
   defaultDataDir,
@@ -36,6 +42,11 @@ import {
   workspaceStats,
   updateWorkspacePrefs,
   WorkspaceNotFoundError,
+  WorkspaceUnusableError,
+  isUsable,
+  workspaceStatus,
+  quarantineWorkspace,
+  unquarantineWorkspace,
 } from '../core/workspace';
 import {
   openDatabase,
@@ -718,11 +729,15 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
 
   const rows = items.map((w) => {
     let stats: ReturnType<typeof workspaceStats> | null = null;
-    try {
-      stats = workspaceStats(dataDir, w);
-    } catch {
-      stats = null;
+    // 异常工作区不去读它的库：状态都不对了，数字也不可信
+    if (isUsable(w)) {
+      try {
+        stats = workspaceStats(dataDir, w);
+      } catch {
+        stats = null;
+      }
     }
+    const st = workspaceStatus(w);
     return {
       active: w.id === reg.activeWorkspaceId ? '●' : ' ',
       id: w.id,
@@ -733,6 +748,9 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
       createdAt: w.createdAt.slice(0, 19).replace('T', ' '),
       bytes: stats?.dbBytes ?? null,
       ok: stats?.integrityOk ?? null,
+      status: st,
+      statusText: st === 'ok' ? '正常' : st === 'importing' ? '导入未完成' : '已隔离',
+      statusReason: w.statusReason ?? null,
     };
   });
 
@@ -741,6 +759,7 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
       dataDir,
       activeWorkspaceId: reg.activeWorkspaceId,
       count: rows.length,
+      abnormal: rows.filter((r) => r.status !== 'ok').length,
       workspaces: rows.map((r) => ({
         id: r.id,
         name: r.name,
@@ -751,6 +770,9 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
         createdAt: r.createdAt,
         dbBytes: r.bytes,
         integrityOk: r.ok,
+        status: r.status,
+        usable: r.status === 'ok',
+        statusReason: r.statusReason,
       })),
     });
     return EXIT.OK;
@@ -766,6 +788,7 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
     { title: '', get: (r) => r.active, max: 1 },
     { title: 'ID', get: (r) => r.id, max: 22 },
     { title: '名称', get: (r) => r.name, max: 24 },
+    { title: '状态', get: (r) => r.statusText, max: 12 },
     { title: '物品', get: (r) => (r.items === null ? '—' : String(r.items)), align: 'right' },
     { title: '流水', get: (r) => (r.moves === null ? '—' : String(r.moves)), align: 'right' },
     { title: '来源', get: (r) => r.source, max: 8 },
@@ -773,6 +796,18 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
     { title: '大小', get: (r) => (r.bytes === null ? '—' : formatBytes(r.bytes)), align: 'right' },
     { title: '完整性', get: (r) => (r.ok === null ? '?' : r.ok ? 'ok' : '异常') },
   ]);
+
+  const bad = rows.filter((r) => r.status !== 'ok');
+  if (bad.length > 0) {
+    write(`\n有 ${bad.length} 个工作区不可用（禁止读写）：`);
+    for (const b of bad) {
+      write(`  ${b.name} —— ${b.statusText}${b.statusReason ? `：${b.statusReason}` : ''}`);
+    }
+    write('恢复方式：导出备份 → 删除 → 重新导入。');
+    write(`  dsh-inv export --ws "<工作区>" -o 备份.zip`);
+    write(`  dsh-inv ws rm "<工作区>" --yes`);
+    write(`  dsh-inv import 备份.zip`);
+  }
   return EXIT.OK;
 }
 
@@ -966,7 +1001,9 @@ function cmdWsStats(args: ParsedArgs, dataDir: string): number {
 }
 
 function cmdWsVerify(args: ParsedArgs, dataDir: string): number {
-  const entries = str(args, 'ws') ? [requireWorkspace(dataDir, str(args, 'ws')!)] : listWorkspaces(dataDir);
+  const entries = str(args, 'ws')
+    ? [resolveWorkspace(dataDir, str(args, 'ws')!, { allowUnusable: true })]
+    : listWorkspaces(dataDir);
 
   if (entries.length === 0) {
     if (out.json) emitJson({ checked: 0, failed: 0, results: [] }, ['没有工作区']);
@@ -986,14 +1023,38 @@ function cmdWsVerify(args: ParsedArgs, dataDir: string): number {
       expectedSchemaVersion: s.verify.expectedSchemaVersion,
       messages: s.verify.messages,
       tableCounts: s.tableCounts,
+      statusBefore: workspaceStatus(e),
     };
   });
 
   const bad = results.filter((r) => !r.ok);
 
+  /**
+   * 自检不过的**自动隔离**。
+   *
+   * 光报个"异常"没用 —— 用户下次照样能点进去改，边改边坏。
+   * 标成隔离之后读写会被闸门挡住，界面上也会出现"导出备份 → 删除重建"的指引。
+   *
+   * `--no-quarantine` 可以只报告不动状态（排查问题时想先看看再说）。
+   */
+  const autoQuarantine = !bool(args, 'noQuarantine') && !bool(args, 'dryRun');
+  const quarantined: string[] = [];
+  if (autoQuarantine) {
+    for (const b of bad) {
+      if (b.statusBefore === 'quarantined') continue;
+      quarantineWorkspace(dataDir, b.id, `自检未通过：${b.messages.join('；') || b.integrity}`);
+      quarantined.push(b.name);
+    }
+  }
+
   if (out.json) {
     emitJson(
-      { checked: results.length, failed: bad.length, results },
+      {
+        checked: results.length,
+        failed: bad.length,
+        quarantined,
+        results: results.map((r) => ({ ...r, status: workspaceStatus(requireWorkspace(dataDir, r.id)) })),
+      },
       bad.map((b) => `${b.name}: ${b.messages.join('；')}`),
     );
     return bad.length > 0 ? EXIT.VALIDATION : EXIT.OK;
@@ -1007,6 +1068,14 @@ function cmdWsVerify(args: ParsedArgs, dataDir: string): number {
     { title: '结构版本', get: (r) => `${r.schemaVersion}/${r.expectedSchemaVersion}` },
   ]);
   for (const b of bad) for (const m of b.messages) log(`  [${b.name}] ${m}`);
+  if (quarantined.length > 0) {
+    write(`\n已隔离 ${quarantined.length} 个工作区：${quarantined.join('、')}`);
+    write('它们现在禁止读写。建议：先导出备份，再删除并重新导入。');
+    write(`  dsh-inv export --ws "<工作区>" -o 备份.zip`);
+    write(`  dsh-inv ws rm "<工作区>" --yes`);
+  } else if (bad.length > 0) {
+    write('\n（--no-quarantine 或 --dry-run：只报告，未改动状态）');
+  }
   return bad.length > 0 ? EXIT.VALIDATION : EXIT.OK;
 }
 
@@ -1033,6 +1102,53 @@ function cmdWsRename(args: ParsedArgs, dataDir: string): number {
   const updated = renameWorkspace(dataDir, entry.id, newName);
   if (out.json) emitJson({ id: updated.id, name: updated.name });
   else write(`已重命名为「${updated.name}」`);
+  return EXIT.OK;
+}
+
+function cmdWsQuarantine(args: ParsedArgs, dataDir: string): number {
+  const key = args._[0];
+  if (!key) throw new ArgError('用法: ws quarantine <工作区> [--reason <原因>]');
+  const entry = resolveWorkspace(dataDir, key, { allowUnusable: true });
+  const reason = str(args, 'reason') ?? '用户手动标记';
+
+  const updated = quarantineWorkspace(dataDir, entry.id, reason);
+
+  if (out.json) {
+    emitJson({ id: updated.id, name: updated.name, status: updated.status, reason: updated.statusReason });
+    return EXIT.OK;
+  }
+  write(`已把「${updated.name}」标记为异常，读写已被禁止。`);
+  write(`原因：${reason}`);
+  write('\n恢复方式：先导出备份，再删除并重新导入。');
+  write(`  dsh-inv export --ws "${updated.name}" -o 备份.zip`);
+  write(`  dsh-inv ws rm "${updated.name}" --yes`);
+  write('  dsh-inv import 备份.zip');
+  return EXIT.OK;
+}
+
+function cmdWsUnquarantine(args: ParsedArgs, dataDir: string): number {
+  const key = args._[0];
+  if (!key) throw new ArgError('用法: ws unquarantine <工作区>');
+  const entry = resolveWorkspace(dataDir, key, { allowUnusable: true });
+
+  // 顺便跑一次自检：数据真有问题的话，解除隔离只会让它继续坏下去
+  const before = entry.statusReason ?? '';
+  const s = workspaceStats(dataDir, entry);
+  if (!s.verify.ok) {
+    write(`「${entry.name}」自检未通过，不能解除隔离：`);
+    for (const m of s.verify.messages) write(`  ${m}`);
+    write('\n请先导出备份，然后删除并重新导入。');
+    return EXIT.VALIDATION;
+  }
+
+  const updated = unquarantineWorkspace(dataDir, entry.id);
+
+  if (out.json) {
+    emitJson({ id: updated.id, name: updated.name, status: workspaceStatus(updated), previousReason: before });
+    return EXIT.OK;
+  }
+  write(`已解除「${updated.name}」的异常标记，现在可以正常读写。`);
+  if (before) write(`（原标记原因：${before}）`);
   return EXIT.OK;
 }
 
@@ -2871,9 +2987,37 @@ function cmdImport(args: ParsedArgs, dataDir: string): number {
   if (!existsSync(resolve(archive))) throw new NotFoundError(`归档不存在: ${resolve(archive)}`);
 
   const name = str(args, 'name');
-  const preview = previewArchive(archive, name ? { name } : {});
+
+  // 先看是不是多工作区包 —— 它的结构与单工作区不同，预览方式也不一样
+  const detected = detectMultiArchive(archive);
 
   if (bool(args, 'dryRun')) {
+    if (detected.multi) {
+      const data = {
+        dryRun: true,
+        multi: true,
+        archive: resolve(archive),
+        workspaceCount: detected.workspaces.length,
+        workspaces: detected.workspaces,
+      };
+      if (out.json) emitJson(data);
+      else {
+        write('归档预演（未写入任何数据）');
+        printKv([
+          ['归档', resolve(archive)],
+          ['类型', `多工作区包（${detected.workspaces.length} 个）`],
+        ]);
+        printSection('将分别新建这些工作区');
+        printTable(detected.workspaces, [
+          { title: '目录', get: (w) => w.dir, max: 30 },
+          { title: '名称', get: (w) => w.name, max: 30 },
+        ], { indent: 2 });
+        write('\n去掉 --dry-run 即执行：每个子目录会分别建成一个独立工作区。');
+      }
+      return EXIT.OK;
+    }
+
+    const preview = previewArchive(archive, name ? { name } : {});
     if (out.json) {
       emitJson(
         { dryRun: true, ...summarizePreview(preview) },
@@ -2914,78 +3058,177 @@ function cmdImport(args: ParsedArgs, dataDir: string): number {
 
   const opts: Parameters<typeof importArchive>[1] = { dataDir };
   if (name) opts.name = name;
-  const result = importArchive(archive, opts);
+  const result = importAnything(archive, opts);
 
-  if (!result.ok) {
-    emitError(EXIT.VALIDATION, 'ValidationFailed', `归档存在 ${result.preview.errorCount} 个错误，未导入任何数据`, {
-      issues: result.preview.issues.slice(0, 100),
-    });
-    return EXIT.VALIDATION;
+  // ── 多工作区：逐个报，失败的不影响成功的 ──
+  if (result.multi) {
+    if (out.json) {
+      emitJson({
+        multi: true,
+        total: result.total,
+        succeeded: result.succeeded,
+        failed: result.failed,
+        items: result.items,
+        tookMs: result.tookMs,
+      });
+      return result.failed > 0 ? EXIT.VALIDATION : EXIT.OK;
+    }
+
+    write(`已从多工作区包新建 ${result.succeeded}/${result.total} 个工作区`);
+    printTable(result.items, [
+      { title: '结果', get: (i) => (i.ok ? 'ok' : '失败'), max: 6 },
+      { title: '名称', get: (i) => i.name, max: 24 },
+      { title: 'ID', get: (i) => i.workspaceId ?? '—', max: 22 },
+      {
+        title: '数据量',
+        get: (i) => Object.entries(i.rowCounts).map(([k, v]) => `${k} ${v}`).join(' · ') || '—',
+        max: 32,
+      },
+      { title: '说明', get: (i) => i.error ?? '', max: 40 },
+    ]);
+    if (result.failed > 0) {
+      write(`\n有 ${result.failed} 个工作区导入失败，已被标记为异常（禁止读写）。`);
+      write('它们会出现在 `ws list` 里，可以导出后删除重建。');
+    }
+    write('\n注意：每个子目录都是「新建工作区」，任何已有工作区都没有被修改。');
+    return result.failed > 0 ? EXIT.VALIDATION : EXIT.OK;
   }
 
-  const warnings = result.preview.issues.filter((i) => i.level === 'warning').map((i) => i.message);
+  // ── 单工作区 ──
+  const one = result.items[0];
+  if (!one || !one.ok) {
+    emitError(EXIT.VALIDATION, 'ValidationFailed', one?.error ?? '导入失败', { item: one ?? null });
+    return EXIT.VALIDATION;
+  }
 
   if (out.json) {
     emitJson(
       {
-        workspaceId: result.workspaceId,
-        workspaceName: result.workspaceName,
-        dbPath: result.dbPath,
-        rowCounts: result.rowCounts,
-        checksumVerified: result.preview.checksumVerified,
-        reportPath: result.reportPath,
-        sourceArchive: resolve(archive),
+        multi: false,
+        workspaceId: one.workspaceId,
+        workspaceName: one.name,
+        rowCounts: one.rowCounts,
+        tookMs: result.tookMs,
       },
-      warnings,
-      { tookMs: result.tookMs },
+      [],
     );
     return EXIT.OK;
   }
 
-  write(`已导入为新工作区「${result.workspaceName}」`);
+  write(`已导入为新工作区「${one.name}」`);
   printKv([
-    ['ID', String(result.workspaceId)],
-    ['数据库', String(result.dbPath)],
-    ['数据量', Object.entries(result.rowCounts).map(([k, v]) => `${k} ${v}`).join(' · ')],
+    ['ID', String(one.workspaceId)],
+    ['数据量', Object.entries(one.rowCounts).map(([k, v]) => `${k} ${v}`).join(' · ')],
   ]);
   write('\n注意：这是一次「新建工作区」，任何已有工作区都没有被修改。');
   return EXIT.OK;
 }
 
+/**
+ * `export` —— 支持多选工作区。
+ *
+ * 选 1 个：根目录就是数据（老格式，老版本也读得回来）。
+ * 选多个：多一层 `workspaces/<名字>/`，根目录放 `kind: 'multi'` 的总 manifest。
+ *
+ * 取工作区的方式：`--ws` 可以给多次，也可以逗号分隔；位置参数也算。
+ * 都不给就是当前工作区。
+ */
 function cmdExport(args: ParsedArgs, dataDir: string): number {
-  const entry = resolveWorkspace(dataDir, str(args, 'ws') ?? args._[0] ?? null);
+  const raw: string[] = [];
+  for (const w of arr(args, 'ws')) for (const part of String(w).split(',')) if (part.trim()) raw.push(part.trim());
+  for (const a of args._) if (String(a).trim()) raw.push(String(a).trim());
+
+  const entries =
+    raw.length > 0
+      ? raw.map((id) => resolveWorkspace(dataDir, id, { allowUnusable: true }))
+      : [resolveWorkspace(dataDir, null, { allowUnusable: true })];
+
+  // 去重（同一个工作区写两遍没意义，还会生成两个同名目录）
+  const seen = new Set<string>();
+  const uniq = entries.filter((e) => (seen.has(e.id) ? false : (seen.add(e.id), true)));
+
   const outPath = str(args, 'out') ?? str(args, 'o');
-  const opts: Parameters<typeof exportWorkspace>[2] = {};
-  if (outPath) opts.outPath = outPath;
+  const multi = uniq.length > 1;
 
   if (bool(args, 'dryRun')) {
-    const target = outPath ? resolve(outPath) : '(默认 exports/ 目录)';
-    if (out.json) emitJson({ dryRun: true, would: { export: entry.id, to: target } });
-    else write(`将导出「${entry.name}」到 ${target}`);
+    const data = {
+      dryRun: true,
+      multi,
+      workspaces: uniq.map((e) => ({ id: e.id, name: e.name })),
+      to: outPath ? resolve(outPath) : '(默认 exports/ 目录)',
+      structure: multi ? '多工作区（workspaces/<名字>/…）' : '单工作区（根目录即数据）',
+    };
+    if (out.json) emitJson(data);
+    else {
+      write(`将导出 ${uniq.length} 个工作区到 ${data.to}`);
+      write(`结构：${data.structure}`);
+      for (const e of uniq) write(`  · ${e.name}`);
+    }
     return EXIT.OK;
   }
 
-  const result = exportWorkspace(dataDir, entry, opts);
+  if (!multi) {
+    const opts: Parameters<typeof exportWorkspace>[2] = {};
+    if (outPath) opts.outPath = outPath;
+    const result = exportWorkspace(dataDir, uniq[0]!, opts);
+
+    if (out.json) {
+      emitJson({
+        multi: false,
+        archivePath: result.archivePath,
+        bytes: result.bytes,
+        workspaceId: result.workspace.id,
+        workspaceName: result.workspace.name,
+        rowCounts: result.rowCounts,
+        fileCount: result.fileCount,
+        exportedAt: result.exportedAt,
+      });
+      return EXIT.OK;
+    }
+
+    write(`已导出工作区「${result.workspace.name}」`);
+    printKv([
+      ['归档', result.archivePath],
+      ['大小', `${formatBytes(result.bytes)}  （${result.fileCount} 个文件）`],
+      ['数据量', Object.entries(result.rowCounts).map(([k, v]) => `${k} ${v}`).join(' · ')],
+    ]);
+    return EXIT.OK;
+  }
+
+  const opts: Parameters<typeof exportWorkspaces>[2] = {};
+  if (outPath) opts.outPath = outPath;
+  const result = exportWorkspaces(dataDir, uniq, opts);
 
   if (out.json) {
     emitJson({
+      multi: true,
       archivePath: result.archivePath,
       bytes: result.bytes,
-      workspaceId: result.workspace.id,
-      workspaceName: result.workspace.name,
-      rowCounts: result.rowCounts,
+      workspaceCount: result.workspaces.length,
+      workspaces: result.workspaces,
       fileCount: result.fileCount,
       exportedAt: result.exportedAt,
     });
     return EXIT.OK;
   }
 
-  write(`已导出工作区「${result.workspace.name}」`);
+  write(`已导出 ${result.workspaces.length} 个工作区`);
   printKv([
     ['归档', result.archivePath],
     ['大小', `${formatBytes(result.bytes)}  （${result.fileCount} 个文件）`],
-    ['数据量', Object.entries(result.rowCounts).map(([k, v]) => `${k} ${v}`).join(' · ')],
+    ['结构', '根目录 = 总目录；workspaces/<名字>/ = 各工作区的数据'],
   ]);
+  printSection('包含的工作区');
+  printTable(result.workspaces, [
+    { title: '名称', get: (w) => w.name, max: 24 },
+    { title: '目录', get: (w) => `workspaces/${w.dir}`, max: 40 },
+    {
+      title: '数据量',
+      get: (w) => Object.entries(w.rowCounts).map(([k, v]) => `${k} ${v}`).join(' · '),
+      max: 32,
+    },
+  ], { indent: 2 });
+  write('\n导入时会把每个子目录分别建成一个独立工作区。');
   return EXIT.OK;
 }
 
@@ -3031,7 +3274,30 @@ const COMMANDS: Command[] = [
   },
   { path: ['ws', 'show'], summary: '查看工作区详情与提醒摘要', usage: 'ws show [<工作区>]', options: [], run: cmdWsShow },
   { path: ['ws', 'stats'], summary: '统计：按分类 / 状态 / 房间分布、金额合计', usage: 'ws stats [<工作区>]', options: [], run: cmdWsStats },
-  { path: ['ws', 'verify'], summary: '一致性自检（完整性 / 外键 / 结构版本）', usage: 'ws verify [<工作区>]', options: [], run: cmdWsVerify },
+  {
+    path: ['ws', 'verify'],
+    summary: '一致性自检；不通过的工作区会被自动隔离（禁止读写）',
+    usage: 'ws verify [<工作区>] [--no-quarantine]',
+    options: [
+      { name: 'noQuarantine', type: 'boolean', desc: '只报告，不改工作区状态' },
+      DRY_RUN,
+    ],
+    run: cmdWsVerify,
+  },
+  {
+    path: ['ws', 'quarantine'],
+    summary: '手动把一个工作区标记为异常（禁止读写）',
+    usage: 'ws quarantine <工作区> [--reason <原因>]',
+    options: [{ name: 'reason', type: 'string', desc: '标记原因', valueName: '文本' }],
+    run: cmdWsQuarantine,
+  },
+  {
+    path: ['ws', 'unquarantine'],
+    summary: '解除异常标记（确认数据没问题时才用；正常恢复方式是重建）',
+    usage: 'ws unquarantine <工作区>',
+    options: [],
+    run: cmdWsUnquarantine,
+  },
   { path: ['ws', 'use'], summary: '设置默认工作区', usage: 'ws use <工作区>', options: [], run: cmdWsUse },
   {
     path: ['ws', 'rename'],
@@ -3195,9 +3461,15 @@ const COMMANDS: Command[] = [
   },
   {
     path: ['export'],
-    summary: '导出工作区为归档（manifest.json + 每表一个 CSV）',
-    usage: 'export [<工作区>] [-o <输出.zip>]',
-    options: [{ name: 'out', short: 'o', type: 'string', desc: '输出路径', valueName: 'path' }, DRY_RUN],
+    summary: '导出工作区为归档；给多个工作区时导出成一个多工作区包',
+    usage:
+      'export [<工作区>...] [-o <输出.zip>]\n' +
+      '       export --ws A --ws B -o 多个.zip      （--ws 可重复，也可逗号分隔）',
+    options: [
+      { name: 'ws', type: 'string', multiple: true, desc: '要导出的工作区，可给多次', valueName: '工作区' },
+      { name: 'out', short: 'o', type: 'string', desc: '输出路径', valueName: 'path' },
+      DRY_RUN,
+    ],
     run: cmdExport,
   },
 
@@ -3419,6 +3691,26 @@ export function main(argv: string[]): number {
     if (e instanceof WorkspaceNotFoundError) {
       emitError(EXIT.NOT_FOUND, 'WorkspaceNotFound', e.message, { dataDir });
       return EXIT.NOT_FOUND;
+    }
+    /**
+     * 工作区被隔离 → 退出码 3（数据状态不合法），不是"运行出错"。
+     *
+     * agent 拿到 3 就知道"这个工作区现在不能碰"，而不是"命令写错了，
+     * 换个参数再试试" —— 后者会白试很多次。
+     */
+    if (e instanceof WorkspaceUnusableError) {
+      emitError(EXIT.VALIDATION, 'WorkspaceUnusable', e.message, {
+        workspaceId: e.workspaceId,
+        workspaceName: e.workspaceName,
+        status: e.status,
+        reason: e.reason,
+        recovery: [
+          `dsh-inv export --ws "${e.workspaceName}" -o 备份.zip`,
+          `dsh-inv ws rm "${e.workspaceName}" --yes`,
+          'dsh-inv import 备份.zip',
+        ],
+      });
+      return EXIT.VALIDATION;
     }
     if (e instanceof NotFoundError) {
       emitError(EXIT.NOT_FOUND, 'NotFound', e.message, { dataDir });

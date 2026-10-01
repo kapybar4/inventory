@@ -96,8 +96,10 @@ const api = {
     data: (wsId: string | null, opts?: Record<string, unknown>) => call('timeline:data', wsId, opts ?? null),
   },
   io: {
-    exportWs: (wsId?: string | null) => call('io:export', wsId ?? null),
+    /** 传一个 id 或一组 id：多个时导出成多工作区包 */
+    exportWs: (wsIds: string | string[]) => call('io:export', wsIds),
     previewImport: () => call('io:previewImport'),
+    /** 单工作区与多工作区包都走这里，自动识别 */
     import: (archivePath: string, name?: string) => call('io:import', archivePath, name ?? null),
     openPath: (p: string) => call('io:openPath', p),
     revealPath: (p: string) => call('io:revealPath', p),

@@ -1,13 +1,27 @@
 /**
  * 导出工作区 → 一个 zip 归档。
  *
- * 归档结构：
+ * ── 单个工作区 ──
+ * 归档根就是该工作区的数据：
  *   manifest.json      机器可读的完整结构说明（由 fields.ts 派生）
  *   README.md          人可读的字段说明（由同一份 manifest 渲染）
  *   checksums.txt      每个文件的 sha256
  *   tables/*.csv       每张表一个 CSV
  *   attachments/       照片等附件（可选）
  *   import_report.json 该工作区当初是怎么来的（若是导入创建）
+ *
+ * ── 多个工作区 ──
+ * 多一层：根目录放一个 `kind: 'multi'` 的总 manifest，每个工作区在
+ * `workspaces/<安全名>/` 下，各自是上面那套完整结构（含自己的 manifest）。
+ *
+ *   manifest.json                     总目录（kind=multi，列出全部工作区）
+ *   workspaces/我的家/manifest.json    该工作区自己的
+ *   workspaces/我的家/tables/*.csv
+ *   workspaces/父母家/...
+ *
+ * 单个工作区**刻意不加这一层**：加了之后单工作区的包就没法用老版本读，
+ * 而且"一个工作区的包"和"多个工作区的包"在结构上本来就该不一样 ——
+ * 用 `kind` 区分，不靠"目录数是不是 1"去猜。
  */
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -58,18 +72,58 @@ export function exportWorkspace(
   }
 
   const at = new Date();
-  const exportedAt = nowIso(at);
   const archivePath = resolve(opts.outPath ?? defaultOutPath(dataDir, entry, at));
 
+  // 暂存目录放在目标归档旁边，避免跨盘 rename
+  const stage = join(dirname(archivePath), `.stage-${entry.id}-${process.pid}`);
+  rmSync(stage, { recursive: true, force: true });
+
+  try {
+    const staged = stageWorkspace(dataDir, entry, stage, opts);
+    const allFiles = walkFiles(stage);
+    zipDirectory(stage, archivePath);
+
+    const bytes = existsSync(archivePath) ? readFileSync(archivePath).length : 0;
+
+    return {
+      archivePath,
+      bytes,
+      workspace: { id: entry.id, name: entry.name },
+      rowCounts: staged.rowCounts,
+      fileCount: allFiles.length,
+      exportedAt: staged.exportedAt,
+      files: allFiles,
+    };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+/** 一个工作区写进暂存目录后的结果 */
+interface StagedWorkspace {
+  rowCounts: Record<string, number>;
+  exportedAt: string;
+}
+
+/**
+ * 把一个工作区的数据写进 `stage`（暂存目录）。
+ *
+ * 与 `exportWorkspace` 拆开，是为了让多工作区导出能把 N 个工作区写进
+ * **同一个** stage 的不同子目录 —— 逻辑只有一份，不再复制一遍。
+ */
+function stageWorkspace(
+  dataDir: string,
+  entry: WorkspaceEntry,
+  stage: string,
+  opts: ExportOptions,
+): StagedWorkspace {
+  const exportedAt = nowIso();
   const wsDir = workspaceDir(dataDir, entry);
   const dbPath = workspaceDbPath(dataDir, entry);
   if (!existsSync(dbPath)) {
     throw new Error(`工作区数据库不存在: ${dbPath}`);
   }
 
-  // 暂存目录放在目标归档旁边，避免跨盘 rename
-  const stage = join(dirname(archivePath), `.stage-${entry.id}-${process.pid}`);
-  rmSync(stage, { recursive: true, force: true });
   ensureDir(stage);
   ensureDir(join(stage, 'tables'));
 
@@ -131,24 +185,172 @@ export function exportWorkspace(
     const checksumLines = files.map((rel) => `${sha256File(join(stage, rel))}  ${rel}`);
     writeFileSync(join(stage, 'checksums.txt'), checksumLines.join('\n') + '\n', 'utf8');
 
+    return { rowCounts, exportedAt };
+  } finally {
+    db.close();
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// 多工作区导出
+// ─────────────────────────────────────────────────────────────
+
+/** 总目录的格式标识 */
+export const MULTI_FORMAT = 'dsh-inventory-multi';
+export const MULTI_FORMAT_VERSION = 1;
+
+export interface MultiExportItemResult {
+  id: string;
+  name: string;
+  /** 归档里的子目录名 */
+  dir: string;
+  rowCounts: Record<string, number>;
+}
+
+export interface MultiExportResult {
+  archivePath: string;
+  bytes: number;
+  workspaces: MultiExportItemResult[];
+  fileCount: number;
+  exportedAt: string;
+}
+
+/**
+ * 目录名安全化。
+ *
+ * 工作区名字可以带 `/ : * ?` 这些字符，直接当目录名会写出奇怪的结构甚至
+ * 逃出暂存目录。所以换成下划线，并且**保证不重名**（重名就加 -2、-3）。
+ */
+function safeDirName(name: string, used: Set<string>): string {
+  let base = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').replace(/^\.+/, '_').trim().slice(0, 60);
+  if (base === '') base = 'workspace';
+  let candidate = base;
+  let n = 2;
+  while (used.has(candidate)) {
+    candidate = `${base}-${n}`;
+    n += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+/**
+ * 导出多个工作区 → 一个 zip。
+ *
+ * 结构见文件头的说明。传 1 个也走这条路（会生成 `workspaces/` 那一层）——
+ * 是不是多工作区由**调用方**决定，不由数量猜。命令行里 `export` 只有一个
+ * `--ws` 时走 `exportWorkspace`，给多个时走这里，两条路的产物结构不同、
+ * 但都能被 `import` 认出来。
+ */
+export function exportWorkspaces(
+  dataDir: string,
+  entries: WorkspaceEntry[],
+  opts: ExportOptions = {},
+): MultiExportResult {
+  if (entries.length === 0) throw new Error('至少选一个工作区');
+  if (!archiveToolAvailable()) {
+    throw new ZipError('找不到 tar.exe，无法生成归档（见 src/core/zip.js 的说明）');
+  }
+
+  const at = new Date();
+  const exportedAt = nowIso(at);
+  const fallback = join(dataDir, 'exports', `多工作区-${stampOf(at)}.zip`);
+  const archivePath = resolve(opts.outPath ?? fallback);
+
+  const stage = join(dirname(archivePath), `.stage-multi-${process.pid}`);
+  rmSync(stage, { recursive: true, force: true });
+
+  try {
+    ensureDir(stage);
+    const used = new Set<string>();
+    const items: MultiExportItemResult[] = [];
+
+    for (const entry of entries) {
+      const dir = safeDirName(entry.name, used);
+      // 每个工作区在 workspaces/<dir>/ 下自成一套完整结构，
+      // 所以随便拎一个子目录出来就是一个合法的单工作区归档
+      const sub = join(stage, 'workspaces', dir);
+      const staged = stageWorkspace(dataDir, entry, sub, opts);
+      items.push({ id: entry.id, name: entry.name, dir, rowCounts: staged.rowCounts });
+    }
+
+    // 总目录：放在全部子目录之后写，这样它的 checksums 不会把自己算进去
+    const rootManifest = {
+      format: MULTI_FORMAT,
+      formatVersion: MULTI_FORMAT_VERSION,
+      kind: 'multi' as const,
+      exportedAt,
+      appVersion: readAppVersion(),
+      workspaceCount: items.length,
+      workspaces: items.map((i) => ({
+        id: i.id,
+        name: i.name,
+        dir: i.dir,
+        rowCounts: i.rowCounts,
+      })),
+    };
+    writeFileSync(join(stage, 'manifest.json'), JSON.stringify(rootManifest, null, 2), 'utf8');
+    writeFileSync(join(stage, 'README.md'), renderMultiReadme(rootManifest), 'utf8');
+
+    const files = walkFiles(stage).filter((f) => f !== 'checksums.txt');
+    const checksumLines = files.map((rel) => `${sha256File(join(stage, rel))}  ${rel}`);
+    writeFileSync(join(stage, 'checksums.txt'), checksumLines.join('\n') + '\n', 'utf8');
+
     const allFiles = walkFiles(stage);
     zipDirectory(stage, archivePath);
-    rmSync(stage, { recursive: true, force: true });
-
-    const bytes = existsSync(archivePath) ? readFileSync(archivePath).length : 0;
 
     return {
       archivePath,
-      bytes,
-      workspace: { id: entry.id, name: entry.name },
-      rowCounts,
+      bytes: existsSync(archivePath) ? readFileSync(archivePath).length : 0,
+      workspaces: items,
       fileCount: allFiles.length,
       exportedAt,
-      files: allFiles,
     };
   } finally {
-    db.close();
     rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+interface MultiManifest {
+  exportedAt?: string;
+  appVersion?: string;
+  workspaceCount?: number;
+  workspaces?: { id: string; name: string; dir: string; rowCounts: Record<string, number> }[];
+}
+
+function renderMultiReadme(m: MultiManifest): string {
+  const lines: string[] = [];
+  lines.push('# 多工作区导出包');
+  lines.push('');
+  lines.push(`导出时间：${m.exportedAt ?? ''}`);
+  lines.push(`导出工具：DSH Inventory ${m.appVersion ?? ''}`);
+  lines.push('');
+  lines.push(`共 ${m.workspaceCount ?? 0} 个工作区，每个在 \`workspaces/<目录>/\` 下自成一套完整结构：`);
+  lines.push('');
+  for (const w of m.workspaces ?? []) {
+    lines.push(`- **${w.name}** → \`workspaces/${w.dir}/\``);
+  }
+  lines.push('');
+  lines.push('每个子目录里的 `manifest.json` 才是该工作区的字段说明；');
+  lines.push('本文件所在的根目录只描述"这个包里有哪些工作区"。');
+  lines.push('');
+  lines.push('导入时会把每个子目录**分别建成一个独立工作区**，互不影响。');
+  return lines.join('\n') + '\n';
+}
+
+function stampOf(at: Date): string {
+  const p = (n: number, w = 2): string => String(n).padStart(w, '0');
+  return `${at.getFullYear()}${p(at.getMonth() + 1)}${p(at.getDate())}-${p(at.getHours())}${p(at.getMinutes())}${p(at.getSeconds())}`;
+}
+
+function readAppVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(join(__dirname, '..', '..', 'package.json'), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version ?? '';
+  } catch {
+    return '';
   }
 }
 

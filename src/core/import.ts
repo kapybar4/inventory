@@ -16,16 +16,21 @@ import { ENUMS, EXPORT_TABLE_ORDER, TABLES, tableDef, type FieldDef } from './fi
 import { cellToRaw, parseCsv, serializeCsv, rawToCell } from './csv';
 import { FieldError, deriveExpiryColumns, normalizeFromCsv } from './values';
 import { validateManifest, type Manifest, type ManifestTable } from './manifest';
-import { openDatabase, insertRow, countRows, transaction, nextItemCode } from './db';
+import { openDatabase, insertRow, countRows, transaction, nextItemCode, verifyDatabase } from './db';
 import {
   prepareImportedWorkspace,
   discardWorkspaceDir,
   registerWorkspace,
   workspaceDbPath,
+  readRegistry,
+  removeWorkspace,
+  markImporting,
+  quarantineWorkspace,
+  unquarantineWorkspace,
 } from './workspace';
 import { nowIso, isDateString, monthEnd } from './dates';
 import { readJson, sha256File } from './util';
-import { unzipTo, ZipError } from './zip';
+import { unzipTo, zipDirectory, ZipError } from './zip';
 import { APP_VERSION } from './meta';
 import { uuidv7 } from './ids';
 
@@ -78,6 +83,32 @@ export interface ImportResult {
   rowCounts: Record<string, number>;
   preview: ImportPreview;
   reportPath: string | null;
+  tookMs: number;
+  /** 导入后自检没过，已被隔离 */
+  quarantined?: boolean;
+  quarantineReason?: string;
+}
+
+/** 多工作区包导入的结果：每个子工作区一条 */
+export interface MultiImportItem {
+  /** 归档里的子目录名 */
+  dir: string;
+  name: string;
+  ok: boolean;
+  workspaceId: string | null;
+  rowCounts: Record<string, number>;
+  /** 失败原因（`ok: false` 时有） */
+  error?: string;
+}
+
+export interface MultiImportResult {
+  ok: boolean;
+  /** 是不是多工作区包（false 表示按单工作区处理了） */
+  multi: boolean;
+  items: MultiImportItem[];
+  total: number;
+  succeeded: number;
+  failed: number;
   tookMs: number;
 }
 
@@ -481,12 +512,23 @@ export function importArchive(archivePath: string, opts: ImportOptions): ImportR
     }
 
     // ── 建新工作区 ──
+    //
+    // 注册表登记**先标 importing**，全部写完并自检通过后才置回 ok。
+    // 这一条是"宕机后能识别出坏工作区"的全部依据：中途崩了、断电了、
+    // 被强杀了，注册表里就留着 `importing`，下次打开就能看到它有问题。
+    //
+    // 只靠 integrity_check 是不够的 —— SQLite 本身完全健康，但数据可能只写了一半
+    // （附件拷贝、报告写入都在事务之外）。
     const prepareOpts: { name: string; sourceArchive: string; id?: string } = {
       name: workspaceName,
       sourceArchive: basename(src),
     };
     if (opts.id) prepareOpts.id = opts.id;
     created = prepareImportedWorkspace(opts.dataDir, prepareOpts);
+    if (opts.register !== false) {
+      registerWorkspace(opts.dataDir, created.entry, false);
+      markImporting(opts.dataDir, created.entry.id);
+    }
 
     const dbPath = workspaceDbPath(opts.dataDir, created.entry);
     const db = openDatabase(dbPath);
@@ -554,8 +596,38 @@ export function importArchive(archivePath: string, opts: ImportOptions): ImportR
     const reportPath = join(created.dir, 'import_report.json');
     writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf8');
 
+    // ── 数据自检：通过才解除 importing ──
+    //
+    // 写完了不等于写对了。这里真开一次库做完整性 + 外键 + 结构版本检查，
+    // 不过就直接隔离并如实返回失败 —— 宁可让用户看到一个明确坏掉的工作区，
+    // 也不要让他以为导入成功了、用几天才发现数据是缺的。
+    const vdb = openDatabase(dbPath, { readOnly: true, skipMigrate: true });
+    let verified: ReturnType<typeof verifyDatabase>;
+    try {
+      verified = verifyDatabase(vdb);
+    } finally {
+      vdb.close();
+    }
+
+    if (!verified.ok) {
+      const reason = `导入后自检未通过：${verified.messages.join('；')}`;
+      if (opts.register !== false) quarantineWorkspace(opts.dataDir, created.entry.id, reason);
+      return {
+        ok: false,
+        workspaceId: created.entry.id,
+        workspaceName,
+        dbPath,
+        rowCounts,
+        preview,
+        reportPath,
+        tookMs: Date.now() - started,
+        quarantined: true,
+        quarantineReason: reason,
+      };
+    }
+
     if (opts.register !== false) {
-      registerWorkspace(opts.dataDir, created.entry, false);
+      unquarantineWorkspace(opts.dataDir, created.entry.id);
     }
 
     return {
@@ -569,9 +641,16 @@ export function importArchive(archivePath: string, opts: ImportOptions): ImportR
       tookMs: Date.now() - started,
     };
   } catch (err) {
-    // 失败即彻底清理：注册表没动过，磁盘上不留半个工作区
+    // 失败即彻底清理：注册表里那条也要去掉，磁盘上不留半个工作区。
+    // 用了 forgetOnly —— 数据本来就是残缺的，没必要为它留快照。
     if (created) {
       try {
+        if (opts.register !== false) {
+          const reg = readRegistry(opts.dataDir);
+          if (reg.workspaces.some((w) => w.id === created!.entry.id)) {
+            removeWorkspace(opts.dataDir, created.entry.id, { snapshot: false, forgetOnly: true });
+          }
+        }
         discardWorkspaceDir(opts.dataDir, created.dir);
       } catch {
         /* 清理失败不应掩盖原始错误 */
@@ -582,6 +661,134 @@ export function importArchive(archivePath: string, opts: ImportOptions): ImportR
   } finally {
     rmSync(tempBase, { recursive: true, force: true });
   }
+}
+
+/**
+ * 探测一个归档是不是多工作区包。
+ *
+ * 判据是**总 manifest 里的 `kind === 'multi'`**，不是"里面有几个目录"——
+ * 靠目录数猜会在"单工作区恰好有个同名目录"时判错，而且以后加结构也没法扩展。
+ */
+export function detectMultiArchive(archivePath: string, tempRoot?: string): {
+  multi: boolean;
+  workspaces: { dir: string; name: string }[];
+} {
+  const src = resolve(archivePath);
+  if (!existsSync(src)) throw new Error(`归档不存在: ${src}`);
+
+  const tempBase = mkdtempSync(join(tempRoot ?? tmpdir(), 'dsh-inv-detect-'));
+  const stage = join(tempBase, 'unpacked');
+  try {
+    unzipTo(src, stage);
+    const manifestPath = join(stage, 'manifest.json');
+    if (!existsSync(manifestPath)) return { multi: false, workspaces: [] };
+
+    let raw: { kind?: unknown; workspaces?: unknown };
+    try {
+      raw = JSON.parse(readFileSync(manifestPath, 'utf8')) as typeof raw;
+    } catch {
+      return { multi: false, workspaces: [] };
+    }
+    if (raw.kind !== 'multi' || !Array.isArray(raw.workspaces)) {
+      return { multi: false, workspaces: [] };
+    }
+
+    const workspaces: { dir: string; name: string }[] = [];
+    for (const w of raw.workspaces as { dir?: unknown; name?: unknown }[]) {
+      const dir = typeof w.dir === 'string' ? w.dir : '';
+      // 目录名必须存在且不能往上跳，否则一个手改过的包能读到暂存目录之外
+      if (dir === '' || dir.includes('..') || dir.includes('/') || dir.includes('\\')) continue;
+      if (!existsSync(join(stage, 'workspaces', dir, 'manifest.json'))) continue;
+      workspaces.push({ dir, name: typeof w.name === 'string' ? w.name : dir });
+    }
+    return { multi: true, workspaces };
+  } finally {
+    rmSync(tempBase, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 导入归档 —— 单工作区与多工作区**走同一个入口**，自动识别。
+ *
+ * 多工作区包会分别建成多个独立工作区，一个失败不影响其它：
+ * 每个子工作区各自建目录、各自标状态，失败的会被隔离并在结果里如实报出来。
+ * 这样"导入一半宕机"留下的不是一团乱，而是若干个明确可辨的工作区。
+ */
+export function importAnything(archivePath: string, opts: ImportOptions): MultiImportResult {
+  const started = Date.now();
+  const detected = detectMultiArchive(archivePath, opts.tempRoot);
+
+  if (!detected.multi) {
+    const one = importArchive(archivePath, opts);
+    return {
+      ok: one.ok,
+      multi: false,
+      items: [
+        {
+          dir: '',
+          name: one.workspaceName,
+          ok: one.ok,
+          workspaceId: one.workspaceId,
+          rowCounts: one.rowCounts,
+          error: one.ok ? undefined : one.quarantineReason ?? '导入未通过校验',
+        },
+      ],
+      total: 1,
+      succeeded: one.ok ? 1 : 0,
+      failed: one.ok ? 0 : 1,
+      tookMs: Date.now() - started,
+    };
+  }
+
+  // 多工作区：逐个解包一次。每个子目录都是一个合法的单工作区归档，
+  // 所以直接把子目录压成临时 zip 复用现成的 importArchive —— 不再写第二套写入逻辑。
+  const tempBase = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'dsh-inv-multi-'));
+  const stage = join(tempBase, 'unpacked');
+  const items: MultiImportItem[] = [];
+
+  try {
+    unzipTo(resolve(archivePath), stage);
+
+    for (const w of detected.workspaces) {
+      const sub = join(stage, 'workspaces', w.dir);
+      const subZip = join(tempBase, `${w.dir}.zip`);
+      try {
+        zipDirectory(sub, subZip);
+        const r = importArchive(subZip, { ...opts, name: opts.name ? `${opts.name}-${w.name}` : w.name });
+        items.push({
+          dir: w.dir,
+          name: w.name,
+          ok: r.ok,
+          workspaceId: r.workspaceId,
+          rowCounts: r.rowCounts,
+          error: r.ok ? undefined : r.quarantineReason ?? '导入未通过校验',
+        });
+      } catch (err) {
+        // 一个坏了不影响其余 —— 已经建好的工作区保持原样
+        items.push({
+          dir: w.dir,
+          name: w.name,
+          ok: false,
+          workspaceId: null,
+          rowCounts: {},
+          error: (err as Error).message,
+        });
+      }
+    }
+  } finally {
+    rmSync(tempBase, { recursive: true, force: true });
+  }
+
+  const succeeded = items.filter((i) => i.ok).length;
+  return {
+    ok: succeeded === items.length && items.length > 0,
+    multi: true,
+    items,
+    total: items.length,
+    succeeded,
+    failed: items.length - succeeded,
+    tookMs: Date.now() - started,
+  };
 }
 
 /** 供测试与导出复用：把「字符串模型行」序列化成 CSV 文本 */

@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -47,7 +47,7 @@ import {
   consumeFromStocks,
   hasStocks,
 } from '../core/bulk';
-import { exportWorkspace } from '../core/export';
+import { exportWorkspace, exportWorkspaces } from '../core/export';
 import { importArchive, previewArchive } from '../core/import';
 import { seedWorkspace } from '../core/seed';
 import {
@@ -74,7 +74,7 @@ import { normalizeFromCsv, centsToYuan, yuanToCents, deriveExpiryColumns, isSpen
 import { buildDdl, SCHEMA_VERSION } from '../core/schema';
 import { uuidv7, isUuid } from '../core/ids';
 import { buildManifest, validateManifest, CSV_CONVENTION } from '../core/manifest';
-import { zipDirectory } from '../core/zip';
+import { zipDirectory, unzipTo } from '../core/zip';
 import {
   buildTree,
   sortItems,
@@ -96,8 +96,197 @@ import {
   parseExtra,
   serializeExtra,
 } from '../core/values';
-import { updateWorkspacePrefs } from '../core/workspace';
+import {
+  updateWorkspacePrefs,
+  quarantineWorkspace,
+  unquarantineWorkspace,
+  markImporting,
+  workspaceStatus,
+  isUsable,
+  assertUsable,
+  pickWorkspace,
+  resolveWorkspace,
+} from '../core/workspace';
 import { exportTableColumns } from './_helpers';
+
+// ═════════════════════════════════════════════════════════════
+// 工作区状态：正常 / 导入中 / 已隔离
+// ═════════════════════════════════════════════════════════════
+
+test('工作区缺省是正常的', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const ws = createWorkspace(dataDir, { name: '甲', id: 'ws_st_a' });
+    assert.equal(workspaceStatus(ws.entry), 'ok', '新建的就是 ok');
+    assert.equal(isUsable(ws.entry), true);
+    assert.doesNotThrow(() => assertUsable(ws.entry));
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('隔离后 resolveWorkspace 拒绝，allowUnusable 放行', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    createWorkspace(dataDir, { name: '甲', id: 'ws_st_b' });
+    quarantineWorkspace(dataDir, 'ws_st_b', '测试原因');
+
+    assert.throws(() => resolveWorkspace(dataDir, 'ws_st_b'), /禁止读写/, '默认应拒绝');
+    // 恢复路径必须还能走
+    const ok = resolveWorkspace(dataDir, 'ws_st_b', { allowUnusable: true });
+    assert.equal(workspaceStatus(ok), 'quarantined');
+    assert.equal(ok.statusReason, '测试原因', '原因要留着，界面要显示');
+    assert.ok(ok.statusAt, '记下时间');
+
+    // pickWorkspace 只挑不查
+    assert.equal(pickWorkspace(dataDir, 'ws_st_b').id, 'ws_st_b');
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('导入中（importing）的工作区同样被拦住', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    createWorkspace(dataDir, { name: '甲', id: 'ws_st_c' });
+    markImporting(dataDir, 'ws_st_c');
+
+    assert.equal(workspaceStatus(requireWorkspace(dataDir, 'ws_st_c')), 'importing');
+    assert.throws(() => resolveWorkspace(dataDir, 'ws_st_c'), /导入没有完成|导入尚未完成/);
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('解除隔离后恢复可用，状态字段清干净', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    createWorkspace(dataDir, { name: '甲', id: 'ws_st_d' });
+    quarantineWorkspace(dataDir, 'ws_st_d', '原因');
+    unquarantineWorkspace(dataDir, 'ws_st_d');
+
+    const e = requireWorkspace(dataDir, 'ws_st_d');
+    assert.equal(workspaceStatus(e), 'ok');
+    assert.equal(e.statusReason, undefined, '原因要清掉');
+    assert.equal(e.statusAt, undefined, '时间要清掉');
+    assert.doesNotThrow(() => resolveWorkspace(dataDir, 'ws_st_d'));
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('状态按工作区隔离，不互相影响', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    createWorkspace(dataDir, { name: '甲', id: 'ws_st_e1' });
+    createWorkspace(dataDir, { name: '乙', id: 'ws_st_e2' });
+    quarantineWorkspace(dataDir, 'ws_st_e1', '只有甲坏了');
+
+    assert.throws(() => resolveWorkspace(dataDir, 'ws_st_e1'));
+    assert.doesNotThrow(() => resolveWorkspace(dataDir, 'ws_st_e2'), '乙不受影响');
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('多工作区导出：每个子目录自成一套完整内容', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const a = createWorkspace(dataDir, { name: '甲', id: 'ws_mx_a' });
+    const b = createWorkspace(dataDir, { name: '乙', id: 'ws_mx_b' });
+    for (const [ws, code] of [
+      [a, 'A-1'],
+      [b, 'B-1'],
+    ] as const) {
+      const db = openDatabase(workspaceDbPath(dataDir, ws.entry));
+      try {
+        insertRow(db, 'items', { code, name: `东西${code}`, category: 'daily' });
+      } finally {
+        db.close();
+      }
+    }
+
+    const zip = join(root, 'multi.zip');
+    const result = exportWorkspaces(dataDir, [a.entry, b.entry], { outPath: zip });
+    assert.equal(result.workspaces.length, 2);
+    assert.deepEqual(result.workspaces.map((w) => w.dir), ['甲', '乙'], '子目录用工作区名');
+
+    const unpack = join(root, 'unpacked');
+    unzipTo(zip, unpack);
+    for (const w of result.workspaces) {
+      const rel = join('workspaces', w.dir, 'manifest.json');
+      assert.ok(existsSync(join(unpack, rel)), `应有 ${rel}`);
+    }
+    const rootManifest = JSON.parse(readFileSync(join(unpack, 'manifest.json'), 'utf8')) as {
+      kind?: string;
+      workspaceCount?: number;
+    };
+    assert.equal(rootManifest.kind, 'multi', '根目录是总目录');
+    assert.equal(rootManifest.workspaceCount, 2);
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('多工作区导出：同名工作区的目录不会互相覆盖', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const a = createWorkspace(dataDir, { name: '同名', id: 'ws_mx_c1' });
+    const b = createWorkspace(dataDir, { name: '同名', id: 'ws_mx_c2' });
+
+    const result = exportWorkspaces(dataDir, [a.entry, b.entry], { outPath: join(root, 'dup.zip') });
+    const dirs = result.workspaces.map((w) => w.dir);
+    assert.equal(new Set(dirs).size, 2, `两个目录名必须不同: ${dirs.join(', ')}`);
+    assert.deepEqual(dirs, ['同名', '同名-2'], '第二个加后缀');
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('多工作区导出：目录名不许带路径分隔符（不能逃出暂存目录）', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const a = createWorkspace(dataDir, { name: '../坏东西', id: 'ws_mx_d' });
+    const result = exportWorkspaces(dataDir, [a.entry], { outPath: join(root, 'evil.zip') });
+    const dir = result.workspaces[0]!.dir;
+    assert.ok(!dir.includes('..'), `不该出现 ..：${dir}`);
+    assert.ok(!dir.includes('/') && !dir.includes('\\'), `不该出现分隔符：${dir}`);
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('隔离的工作区仍然能导出（否则数据就拿不回来了）', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const ws = createWorkspace(dataDir, { name: '坏了的', id: 'ws_mx_e' });
+    const db = openDatabase(workspaceDbPath(dataDir, ws.entry));
+    try {
+      insertRow(db, 'items', { code: 'E-1', name: '要抢救的数据', category: 'daily' });
+    } finally {
+      db.close();
+    }
+
+    quarantineWorkspace(dataDir, 'ws_mx_e', '模拟损坏');
+    // 导出不走状态检查，所以照样能跑
+    const out = exportWorkspace(dataDir, requireWorkspace(dataDir, 'ws_mx_e'), {
+      outPath: join(root, 'rescue.zip'),
+    });
+    assert.ok(existsSync(out.archivePath), '归档生成了');
+    assert.equal(out.rowCounts['items'], 1, '数据在里面');
+  } finally {
+    removeTempRoot(root);
+  }
+});
 
 // ═════════════════════════════════════════════════════════════
 // 补充信息（extra_json）
