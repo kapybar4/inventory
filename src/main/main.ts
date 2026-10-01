@@ -6,7 +6,7 @@
  *   - core 里禁止 import electron —— 一旦破例，CLI 就无法在纯 Node 下运行了。
  *   - 渲染进程拿不到 Node，只能通过 preload 暴露的白名单通道访问数据。
  */
-import { app, BrowserWindow, dialog, ipcMain, shell, Menu } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeTheme } from 'electron';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
@@ -96,8 +96,17 @@ function createWindow(): void {
     height: 860,
     minWidth: 940,
     minHeight: 620,
-    title: `${APP_NAME} ${APP_VERSION}`,
-    backgroundColor: '#0f1115',
+    // 标题栏只留应用名，不带版本号 —— 版本在「字段与格式」页和 --version 里看
+    title: APP_NAME,
+    /*
+     * `backgroundColor` 对齐 `--bg`：首帧防白闪。
+     *
+     * 系统标题栏的颜色**不在这里设**，靠下面的 `themeSource = 'dark'`。
+     * 这里试过 `titleBarOverlay`，那个配置只在自绘标题栏
+     * （`titleBarStyle: 'hidden'`）时才生效；而本项目的顶栏没给窗口按钮
+     * 留位置（导航右边界距窗口右边只有 16px），改成自绘会把按钮压在内容上。
+     */
+    backgroundColor: THEME_BG,
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
@@ -236,6 +245,14 @@ function pickKnownFields(table: string, input: Record<string, unknown>): Record<
   }
   return out;
 }
+
+/**
+ * 主题色。**必须与 `src/renderer/styles.css` 里的 `--bg` / `--fg` 保持一致。**
+ *
+ * 写在这里是因为主进程开窗口时就要用到（首帧底色、系统标题栏），
+ * 那时候渲染层还没加载、拿不到 CSS 变量。改配色时两处一起改。
+ */
+const THEME_BG = '#000000';
 
 /**
  * 把数据库裸行补成界面能直接渲染的物品对象。
@@ -1230,7 +1247,7 @@ function registerHandlers(): void {
         app.getPath('documents'),
         multi ? `多工作区-${entries.length}个.zip` : `${safe(entries[0]!.name)}.zip`,
       ),
-      filters: [{ name: 'DSH Inventory 归档', extensions: ['zip'] }],
+      filters: [{ name: 'Inventory 归档', extensions: ['zip'] }],
     });
     if (result.canceled || !result.filePath) return { canceled: true };
 
@@ -1263,7 +1280,7 @@ function registerHandlers(): void {
     const picked = await dialog.showOpenDialog({
       title: '选择要导入的归档',
       properties: ['openFile'],
-      filters: [{ name: 'DSH Inventory 归档', extensions: ['zip'] }],
+      filters: [{ name: 'Inventory 归档', extensions: ['zip'] }],
     });
     if (picked.canceled || picked.filePaths.length === 0) return { canceled: true };
 
@@ -1456,6 +1473,18 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
+
+    /*
+     * 强制暗色。这一步必须在开窗口**之前**做。
+     *
+     * 系统标题栏是 Windows 画的、跟着系统主题走 —— 这台机器处于浅色模式，
+     * 所以界面内容再黑，标题栏也还是浅灰的一条，像两个程序拼在一起。
+     * 设成 dark 之后系统会把标题栏、窗口边框、原生右键菜单都按暗色渲染。
+     * 界面本来就只有暗色一套配色（styles.css 里没有浅色变量），
+     * 所以不需要再判断系统偏好。
+     */
+    nativeTheme.themeSource = 'dark';
+
     registerHandlers();
     createWindow();
     // 起点：排到下一个零点，之后每次响完再排下一次

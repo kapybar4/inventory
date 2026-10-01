@@ -13,6 +13,22 @@ const CLI = join(process.cwd(), 'dist', 'cli', 'main.js');
 const ROOT = mkdtempSync(join(tmpdir(), 'ft-'));
 const HOME = join(ROOT, 'home');
 
+/**
+ * 按**本地日期**算 N 天后。放在文件顶部是因为多个小节都要用。
+ *
+ * 别写成 `new Date(Date.now() + n*864e5).toISOString().slice(0,10)` ——
+ * `toISOString` 给的是 UTC 日期。本地过了午夜、UTC 还没过的时候
+ * （中国时区就是本地 00:00~08:00 这段）算出来会**少一天**，
+ * 于是「16 天后」实际只有 15 天，「第 16 天不算」那条断言
+ * 只在下午跑得通、后半夜必挂 —— 一个只在特定时段冒出来的假失败。
+ */
+const daysFromNow = (n) => {
+  const d = new Date();
+  d.setDate(d.getDate() + n);
+  const p = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+
 let pass = 0;
 let fail = 0;
 const failures = [];
@@ -459,7 +475,7 @@ check('已过期的物品被标为已过期', () => {
 });
 
 check('--expiring N 只留 N 天内到期的', () => {
-  const soon = json(['item', 'add', '--name', '近期到期', '-c', 'daily', '--expires-on', new Date(Date.now() + 10 * 864e5).toISOString().slice(0, 10)]).data.data.created[0].uuid;
+  const soon = json(['item', 'add', '--name', '近期到期', '-c', 'daily', '--expires-on', daysFromNow(10)]).data.data.created[0].uuid;
   const far = json(['item', 'add', '--name', '远期到期', '-c', 'daily', '--expires-on', '2099-01-01']).data.data.created[0].uuid;
   const list = json(['item', 'list', '--expiring', '30']).data.data.items.map((i) => i.uuid);
   ok(list.includes(soon), '10 天后的应在内');
@@ -1279,8 +1295,6 @@ check('列表接口不返回 extra_json（按需拉取）', () => {
 // ═════════════════════════════════════════════════════════════
 
 section('13. 过期 / 过保');
-
-const daysFromNow = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
 
 check('窗口是 15 天：文案说 15 天', () => {
   cli(['item', 'add', '--name', '十天后到期', '-c', 'daily', '--expires-on', daysFromNow(10)]);

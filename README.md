@@ -1,8 +1,12 @@
-# DSH Inventory
+# Inventory
 
 家庭物品管理。**多工作区、每个工作区一个独立 SQLite 文件、一个完整的命令行工具。**
 
 核心不是"把东西记下来"，而是**快过期时主动告诉你** —— 所以 `alert list` 与桌面端顶部横幅是这套东西存在的理由，数据库只是它的存储引擎。
+
+> 应用显示名是 `Inventory`。仓库名、数据目录（`%LOCALAPPDATA%\dsh-inventory`）、
+> 归档格式标识（`dsh-inventory-archive`）里仍然带 `dsh-` 前缀 ——
+> 那些是**机器标识**，改了老归档读不回来、老数据也找不到。
 
 ---
 
@@ -454,6 +458,25 @@ dsh-inv item purge --yes       # 执行
 ```powershell
 $env:ELECTRON_RUN_AS_NODE = $null   # 启动 Electron 前清掉
 ```
+
+### 界面配色
+
+只有**暗色一套**，底是纯黑 `#000000`，层次靠中性灰往上加 ——
+`styles.css` 里没有浅色变量，也没有 `prefers-color-scheme` 分支。
+
+窗口标题栏由系统绘制，所以主进程启动时会强制 `nativeTheme.themeSource = 'dark'`。
+**这一步是必须的**：系统标题栏跟着系统主题走，若系统是浅色模式，
+界面内容再黑，标题栏也会是一条浅灰色，看着像两个程序拼在一起。
+
+改配色时要同时改两处，它们必须一致：
+
+| 位置 | 变量 | 用途 |
+| --- | --- | --- |
+| `src/renderer/styles.css` | `--bg` / `--fg` | 界面本体 |
+| `src/main/main.ts` | `THEME_BG` | 窗口首帧底色，防白闪 |
+
+`styles.css` 里还声明了 `color-scheme: dark`，否则系统处于浅色模式时，
+滚动条、下拉框、日期选择器这些**原生控件**会是浅色的，在纯黑底上像贴上去的补丁。
 
 
 ---

@@ -9,27 +9,35 @@
  */
 
 :root {
-  /* 层次：从最深到最浅，用 4 级就够，再多会显得脏 */
-  --bg: #0c0e13;
-  --bg-1: #12151c;
-  --bg-2: #171b24;
-  --bg-3: #1e232e;
-  --bg-hover: #232936;
+  /*
+   * 纯黑主题。
+   *
+   * 底色是真的 `#000`，层次靠**中性灰**往上加（不带蓝味）——
+   * 早先用的是一组偏蓝的深灰，在纯黑旁边会显出"发蓝"的色差，
+   * 跟系统标题栏也接不上。
+   *
+   * 与主进程 main.ts 的 THEME_BG / THEME_FG 必须一致（首帧底色与标题栏配色）。
+   */
+  --bg: #000000;
+  --bg-1: #0a0a0a;
+  --bg-2: #121212;
+  --bg-3: #1a1a1a;
+  --bg-hover: #212121;
 
-  --line: #232936;
-  --line-soft: #1b202a;
-  --line-strong: #2e3646;
+  --line: #1f1f1f;
+  --line-soft: #161616;
+  --line-strong: #2e2e2e;
 
-  --fg: #e8ebf1;
-  --fg-dim: #9aa4b5;
-  --fg-faint: #69738a;
+  --fg: #e8e8e8;
+  --fg-dim: #9c9c9c;
+  --fg-faint: #6b6b6b;
 
   --accent: #5b9dff;
-  --accent-dim: #24406b;
+  --accent-dim: #1e3a63;
   --danger: #ff6b63;
-  --danger-dim: #3d1a1d;
+  --danger-dim: #3a1a1a;
   --warn: #f5b544;
-  --warn-dim: #3a2c12;
+  --warn-dim: #382b12;
   --ok: #4ade80;
   --ok-dim: #14301f;
   --info: #56b8ff;
@@ -45,6 +53,14 @@
   --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.6);
 
   --mono: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+
+  /*
+   * 声明成暗色，让**浏览器原生控件**跟着变：
+   * 滚动条、下拉框、复选框、日期选择器、自动填充背景。
+   * 不写的话，系统若处于浅色模式，这些控件会是浅色的，
+   * 在纯黑底上像贴上去的补丁。
+   */
+  color-scheme: dark;
 }
 
 * {

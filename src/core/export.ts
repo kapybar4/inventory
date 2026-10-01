@@ -31,6 +31,7 @@ import { TABLES } from './fields';
 import { EXPORT_TABLE_ORDER } from './fields';
 import { serializeCsv, rawToCell } from './csv';
 import { buildManifest, manifestColumnsForExport, type Manifest } from './manifest';
+import { APP_NAME } from './meta';
 import { workspaceDir, workspaceDbPath, type WorkspaceEntry } from './workspace';
 import { nowIso } from './dates';
 import { ensureDir, sha256File, walkFiles, copyInto } from './util';
@@ -323,7 +324,7 @@ function renderMultiReadme(m: MultiManifest): string {
   lines.push('# 多工作区导出包');
   lines.push('');
   lines.push(`导出时间：${m.exportedAt ?? ''}`);
-  lines.push(`导出工具：DSH Inventory ${m.appVersion ?? ''}`);
+  lines.push(`导出工具：${APP_NAME} ${m.appVersion ?? ''}`);
   lines.push('');
   lines.push(`共 ${m.workspaceCount ?? 0} 个工作区，每个在 \`workspaces/<目录>/\` 下自成一套完整结构：`);
   lines.push('');
@@ -359,7 +360,7 @@ export function renderReadme(manifest: Manifest): string {
   const lines: string[] = [];
   lines.push(`# ${manifest.workspace.name}`);
   lines.push('');
-  lines.push('> 本文件由 DSH Inventory 自动生成。字段定义的权威来源是 `manifest.json`（机器可读），本文件是它的人可读渲染。');
+  lines.push('> 本文件由 Inventory 自动生成。字段定义的权威来源是 `manifest.json`（机器可读），本文件是它的人可读渲染。');
   lines.push('');
   lines.push('## 归档概览');
   lines.push('');
