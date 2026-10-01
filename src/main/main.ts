@@ -1,0 +1,1168 @@
+/**
+ * Electron 主进程。
+ *
+ * 职责边界（重要）：
+ *   - **这里不做任何领域逻辑**。所有业务都在 src/core/ 里，CLI 与桌面端共用。
+ *   - core 里禁止 import electron —— 一旦破例，CLI 就无法在纯 Node 下运行了。
+ *   - 渲染进程拿不到 Node，只能通过 preload 暴露的白名单通道访问数据。
+ */
+import { app, BrowserWindow, dialog, ipcMain, shell, Menu } from 'electron';
+import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+
+import { APP_NAME, APP_VERSION } from '../core/meta';
+import { SCHEMA_VERSION } from '../core/schema';
+import { ENUMS, CATEGORY_LEAD_DAYS, TABLES, exportedFields } from '../core/fields';
+import {
+  createWorkspace,
+  listWorkspaces,
+  readRegistry,
+  writeRegistry,
+  removeWorkspace,
+  renameWorkspace,
+  updateWorkspacePrefs,
+  requireWorkspace,
+  resolveWorkspace,
+  setActiveWorkspace,
+  workspaceDbPath,
+  workspaceStats,
+  WorkspaceNotFoundError,
+  defaultDataDir,
+} from '../core/workspace';
+import {
+  openDatabase,
+  insertRow,
+  updateRow,
+  deleteRow,
+  selectWhere,
+  selectOne,
+  transaction,
+  TOP_LEVEL,
+  applyItemOrder,
+  nextItemCode,
+  type Row,
+} from '../core/db';
+import { computeOverview, groupByCategory, expiriesForItem, leadDaysFor, lowStockItems } from '../core/alerts';
+import {
+  buildTree,
+  uncategorizedCount,
+  SORT_FIELDS,
+  UNCATEGORIZED,
+  type SortField,
+} from '../core/ordering';
+import {
+  addStock,
+  removeStock,
+  stocksOf,
+  stockCounts,
+  toBulkStocks,
+  refreshParentTotals,
+  consumeFromStocks,
+  hasStocks,
+} from '../core/bulk';
+import { exportWorkspace } from '../core/export';
+import { importArchive, previewArchive } from '../core/import';
+import { seedWorkspace } from '../core/seed';
+import { buildManifest } from '../core/manifest';
+import { formatDaysLeft, daysUntil, today } from '../core/dates';
+import { centsToYuan, yuanToCents } from '../core/values';
+import { formatBytes } from '../core/util';
+
+/** 数据根目录：测试可用 DSH_INVENTORY_HOME 覆盖 */
+function dataDir(): string {
+  const env = process.env['DSH_INVENTORY_HOME'];
+  if (env && env.trim()) return env.trim();
+  return join(app.getPath('userData'), 'inventory');
+}
+
+let mainWindow: BrowserWindow | null = null;
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    minWidth: 940,
+    minHeight: 620,
+    title: `${APP_NAME} ${APP_VERSION}`,
+    backgroundColor: '#0f1115',
+    show: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: join(__dirname, '..', 'preload', 'preload.js'),
+      // 安全基线：渲染进程不许碰 Node，只能走白名单 IPC
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  mainWindow.once('ready-to-show', () => mainWindow?.show());
+  void mainWindow.loadFile(join(__dirname, '..', 'renderer', 'index.html'));
+
+  // 外链一律走系统浏览器，不在应用内开新窗口
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: 'deny' };
+  });
+
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// IPC：返回统一的 { ok, data } / { ok:false, error } 信封
+// ─────────────────────────────────────────────────────────────
+
+type Handler = (...args: unknown[]) => unknown;
+
+function handle(channel: string, fn: Handler): void {
+  ipcMain.handle(channel, (_event, ...args) => {
+    try {
+      return { ok: true, data: fn(...args) };
+    } catch (err) {
+      const e = err as Error;
+      return {
+        ok: false,
+        error: {
+          name: e.name || 'Error',
+          message: e.message,
+          notFound: e instanceof WorkspaceNotFoundError,
+        },
+      };
+    }
+  });
+}
+
+function asString(v: unknown, name: string): string {
+  if (typeof v !== 'string' || v.trim() === '') throw new Error(`参数 ${name} 必须是非空字符串`);
+  return v;
+}
+
+function asObject(v: unknown): Record<string, unknown> {
+  if (typeof v !== 'object' || v === null) throw new Error('参数必须是对象');
+  return v as Record<string, unknown>;
+}
+
+/** 工作区来源的显示名：新建 / 示例 / 导入 */
+function workspaceSourceLabel(key: string): string {
+  return ENUMS['workspace_source']?.find((e) => e.key === key)?.label ?? key;
+}
+
+/** 出入库原因的显示名 */
+function moveReasonLabel(key: string): string {
+  return ENUMS['move_reason']?.find((e) => e.key === key)?.label ?? key;
+}
+
+/** 把渲染进程传回的「字符串模型」值限制在我们认识的列上 */
+function pickKnownFields(table: string, input: Record<string, unknown>): Record<string, string | null> {
+  const def = TABLES.find((t) => t.name === table);
+  if (!def) throw new Error(`未知的表: ${table}`);
+  const allowed = new Set(def.fields.filter((f) => !f.internal).map((f) => f.name));
+  const out: Record<string, string | null> = {};
+  for (const [k, v] of Object.entries(input)) {
+    if (!allowed.has(k)) continue;
+    if (v === null || v === undefined) out[k] = null;
+    else if (typeof v === 'boolean') out[k] = v ? 'true' : 'false';
+    else out[k] = String(v);
+  }
+  return out;
+}
+
+function withDb<T>(wsId: string | null, readOnly: boolean, fn: (db: ReturnType<typeof openDatabase>, entry: ReturnType<typeof requireWorkspace>) => T): T {
+  const dd = dataDir();
+  const entry = resolveWorkspace(dd, wsId);
+  const db = openDatabase(workspaceDbPath(dd, entry), readOnly ? { readOnly: true, skipMigrate: true } : {});
+  try {
+    return fn(db, entry);
+  } finally {
+    db.close();
+  }
+}
+
+function registerHandlers(): void {
+  // ── 元信息 / 静态数据 ──
+  handle('app:info', () => ({
+    name: APP_NAME,
+    version: APP_VERSION,
+    schemaVersion: SCHEMA_VERSION,
+    dataDir: dataDir(),
+    isDefaultDataDir: dataDir() === defaultDataDir(),
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    platform: process.platform,
+  }));
+
+  handle('app:schema', () => ({
+    tables: TABLES.map((t) => ({
+      name: t.name,
+      label: t.label,
+      columns: exportedFields(t).map((f) => ({
+        name: f.name,
+        label: f.label,
+        kind: f.kind,
+        required: Boolean(f.required),
+        description: f.description ?? null,
+        enumName: f.enumName ?? null,
+        default: f.default ?? null,
+      })),
+    })),
+    enums: ENUMS,
+    /** 排序字段清单：界面不自己维护一份，避免两处漂移 */
+    sortFields: SORT_FIELDS,
+    categoryLeadDays: CATEGORY_LEAD_DAYS,
+  }));
+
+  handle('app:manifest', () => {
+    const dd = dataDir();
+    let wsInfo = { id: 'preview', name: '预览', createdAt: new Date().toISOString(), source: 'none' };
+    let rowCounts: Record<string, number> = {};
+    try {
+      const entry = resolveWorkspace(dd, null);
+      wsInfo = { id: entry.id, name: entry.name, createdAt: entry.createdAt, source: entry.source };
+      const stats = workspaceStats(dd, entry);
+      rowCounts = stats.tableCounts;
+    } catch {
+      /* 没有工作区时给出空 manifest 预览 */
+    }
+    return buildManifest({ workspace: wsInfo, rowCounts, exportedAt: new Date().toISOString() });
+  });
+
+  // ── 工作区 ──
+  handle('ws:list', () => {
+    const dd = dataDir();
+    const reg = readRegistry(dd);
+    return {
+      dataDir: dd,
+      activeWorkspaceId: reg.activeWorkspaceId,
+      workspaces: reg.workspaces
+        .filter((w) => !w.archived)
+        .map((w) => {
+          let items: number | null = null;
+          let moves: number | null = null;
+          let purgeable = 0;
+          let dbBytes: number | null = null;
+          let integrityOk: boolean | null = null;
+          try {
+            const s = workspaceStats(dd, w);
+            items = s.tableCounts['items'] ?? 0;
+            moves = s.tableCounts['stock_moves'] ?? 0;
+            dbBytes = s.dbBytes;
+            integrityOk = s.integrityOk;
+          } catch {
+            /* 目录被手工删掉时不让整个列表崩掉 */
+          }
+          // 「可一键清理」= 非批量且剩余为 0 的记录数
+          try {
+            const db = openDatabase(workspaceDbPath(dd, w), { readOnly: true });
+            try {
+              const row = db
+                .prepare('SELECT COUNT(*) AS n FROM items WHERE is_bulk = 0 AND remaining <= 0')
+                .get() as { n: number } | undefined;
+              purgeable = Number(row?.n ?? 0);
+            } finally {
+              db.close();
+            }
+          } catch {
+            purgeable = 0;
+          }
+          return {
+            id: w.id,
+            name: w.name,
+            createdAt: w.createdAt,
+            // 来源统一给中文标签，界面直接用
+            source: w.source,
+            sourceLabel: workspaceSourceLabel(w.source),
+            notes: w.notes ?? null,
+            active: w.id === reg.activeWorkspaceId,
+            items,
+            moves,
+            purgeable,
+            dbBytes,
+            integrityOk,
+          };
+        }),
+    };
+  });
+
+  handle('ws:create', (name, seed) => {
+    const dd = dataDir();
+    const created = createWorkspace(dd, {
+      name: asString(name, 'name'),
+      source: seed === true ? 'demo' : 'blank',
+    });
+    const seeded = seed === true ? seedWorkspace(dd, created.entry) : null;
+    return { id: created.entry.id, name: created.entry.name, dbPath: created.dbPath, seeded };
+  });
+
+  handle('ws:update', (id, patch) => {
+    const dd = dataDir();
+    const entry = requireWorkspace(dd, asString(id, 'id'));
+    const input = asObject(patch);
+    let updated = entry;
+
+    const name = input['name'];
+    if (typeof name === 'string' && name.trim() && name.trim() !== entry.name) {
+      updated = renameWorkspace(dd, entry.id, name.trim());
+    }
+
+    // 备注写进注册表，界面上可以给工作区加一句说明
+    if ('notes' in input) {
+      const notes = typeof input['notes'] === 'string' ? (input['notes'] as string) : '';
+      const reg = readRegistry(dd);
+      const target = reg.workspaces.find((w) => w.id === entry.id);
+      if (target) {
+        if (notes.trim()) target.notes = notes.trim();
+        else delete target.notes;
+        writeRegistry(dd, reg);
+        updated = target;
+      }
+    }
+
+    return {
+      id: updated.id,
+      name: updated.name,
+      notes: updated.notes ?? '',
+      source: updated.source,
+      sourceLabel: workspaceSourceLabel(updated.source),
+    };
+  });
+
+  handle('ws:use', (id) => {
+    const dd = dataDir();
+    const entry = requireWorkspace(dd, asString(id, 'id'));
+    setActiveWorkspace(dd, entry.id);
+    return { id: entry.id, name: entry.name };
+  });
+
+  handle('ws:rename', (id, name) => {
+    const dd = dataDir();
+    const entry = requireWorkspace(dd, asString(id, 'id'));
+    const updated = renameWorkspace(dd, entry.id, asString(name, 'name'));
+    return { id: updated.id, name: updated.name };
+  });
+
+  handle('ws:remove', (id) => {
+    const dd = dataDir();
+    const entry = requireWorkspace(dd, asString(id, 'id'));
+    const result = removeWorkspace(dd, entry.id, { snapshot: true });
+    return { id: entry.id, name: entry.name, snapshotPath: result.snapshotPath ?? null };
+  });
+
+  handle('ws:seed', (id) => {
+    const dd = dataDir();
+    const entry = requireWorkspace(dd, asString(id, 'id'));
+    return seedWorkspace(dd, entry);
+  });
+
+  handle('ws:stats', (id) => {
+    const dd = dataDir();
+    const entry = id ? requireWorkspace(dd, asString(id, 'id')) : resolveWorkspace(dd, null);
+    const stats = workspaceStats(dd, entry);
+    return {
+      id: stats.id,
+      name: stats.name,
+      createdAt: stats.createdAt,
+      source: stats.source,
+      dir: stats.dir,
+      dbPath: stats.dbPath,
+      dbBytes: stats.dbBytes,
+      dbBytesText: formatBytes(stats.dbBytes),
+      schemaVersion: stats.schemaVersion,
+      integrityOk: stats.integrityOk,
+      tableCounts: stats.tableCounts,
+      verifyMessages: stats.verify.messages,
+    };
+  });
+
+  handle('ws:verify', (id) => {
+    const dd = dataDir();
+    const entry = id ? requireWorkspace(dd, asString(id, 'id')) : resolveWorkspace(dd, null);
+    return workspaceStats(dd, entry).verify;
+  });
+
+  // ── 物品（v2：一行 = 一件实际存在的东西，没有批次层）──
+  handle('item:list', (wsId, filterRaw) => {
+    const filter = filterRaw ? asObject(filterRaw) : {};
+    return withDb(wsId ? asString(wsId, 'wsId') : null, true, (db) => {
+      const where: string[] = [];
+      const params: (string | number)[] = [];
+      if (typeof filter['category'] === 'string' && filter['category']) {
+        where.push('category = ?');
+        params.push(filter['category']);
+      }
+      if (typeof filter['room'] === 'string' && filter['room']) {
+        where.push('room = ?');
+        params.push(filter['room']);
+      }
+      if (typeof filter['status'] === 'string' && filter['status']) {
+        where.push('status = ?');
+        params.push(filter['status']);
+      } else if (filter['all'] !== true) {
+        where.push(`status IN ('in_stock','in_use')`);
+      }
+      if (typeof filter['search'] === 'string' && filter['search']) {
+        where.push('(name LIKE ? OR brand LIKE ? OR model LIKE ? OR barcode = ?)');
+        const q = `%${filter['search']}%`;
+        params.push(q, q, q, String(filter['search']));
+      }
+      if (filter['lowStock'] === true) where.push('min_stock > 0 AND remaining < min_stock');
+      if (filter['longTerm'] === true) where.push(`(expires_on IS NULL OR expires_on = '')`);
+      if (filter['dated'] === true) where.push(`expires_on IS NOT NULL AND expires_on <> ''`);
+
+      // 顶层物品：不含「一组库存」的子行
+      where.push(TOP_LEVEL);
+
+      const rows = selectWhere(db, 'items', where.join(' AND ') + ' ORDER BY sort_order ASC, rowid ASC', params);
+      const counts = stockCounts(db);
+
+      return rows.map((r) => {
+        const remaining = Number(r['remaining'] ?? 0);
+        const minStock = Number(r['min_stock'] ?? 0);
+        const expiresOn = r['expires_on'] ? String(r['expires_on']) : null;
+        const left = expiresOn ? daysUntil(expiresOn) : null;
+        return {
+          ...r,
+          remaining,
+          minStock,
+          lowStock: minStock > 0 && remaining < minStock,
+          expiresOn,
+          daysLeft: left,
+          daysLeftText: expiresOn ? formatDaysLeft(left) : '长期',
+          isLongTerm: !expiresOn,
+          leadDays: leadDaysFor(r),
+          unitPriceYuan: centsToYuan(r['unit_price_cents'] as string | null),
+          amountYuan: centsToYuan(r['amount_cents'] as string | null),
+          /** 用了「一组库存」时是子行条数 */
+          stockCount: counts.get(String(r['uuid'])) ?? 0,
+          expiry: expiriesForItem(r),
+        };
+      });
+    });
+  });
+
+  handle('item:get', (wsId, uuid) => {
+    return withDb(wsId ? asString(wsId, 'wsId') : null, true, (db) => {
+      const item = selectOne(db, 'items', 'uuid = ?', [asString(uuid, 'uuid')]);
+      if (!item) throw new WorkspaceNotFoundError(`物品 ${String(uuid)}`);
+
+      const remaining = Number(item['remaining'] ?? 0);
+      const minStock = Number(item['min_stock'] ?? 0);
+
+      const moves = db
+        .prepare('SELECT * FROM stock_moves WHERE item_uuid = ? ORDER BY moved_on DESC, created_at DESC')
+        .all(String(uuid)) as Record<string, unknown>[];
+
+      // 「一组库存」
+      const isBulk = item['is_bulk'] === 'true';
+      const nested = isBulk ? stocksOf(db, String(uuid)) : [];
+      const { stocks, totals } = toBulkStocks(nested);
+
+      return {
+        item,
+        expiry: expiriesForItem(item),
+        isLongTerm: expiriesForItem(item).length === 0,
+        remaining,
+        minStock,
+        lowStock: minStock > 0 && remaining < minStock,
+        isBulk,
+        stocks,
+        stockTotals: stocks.length > 0 ? totals : null,
+        leadDays: leadDaysFor(item),
+        unitPriceYuan: centsToYuan(item['unit_price_cents'] as string | null),
+        amountYuan: centsToYuan(item['amount_cents'] as string | null),
+        moves: moves.map((m) => ({
+          uuid: String(m['uuid']),
+          movedOn: String(m['moved_on']),
+          qtyDelta: Number(m['qty_delta']),
+          reason: String(m['reason']),
+          reasonLabel: moveReasonLabel(String(m['reason'])),
+          notes: m['notes'] === null ? null : String(m['notes']),
+        })),
+      };
+    });
+  });
+
+  handle('item:save', (wsId, input) => {
+    const raw = asObject(input);
+    const values = pickKnownFields('items', raw);
+
+    // 金额：界面传的是「元」，库里存「分」
+    if (raw['unitPriceYuan'] !== undefined) {
+      const cents = raw['unitPriceYuan'] === null || raw['unitPriceYuan'] === '' ? null : yuanToCents(String(raw['unitPriceYuan']));
+      values['unit_price_cents'] = cents === null ? null : String(cents);
+    }
+    if (raw['amountYuan'] !== undefined) {
+      const cents = raw['amountYuan'] === null || raw['amountYuan'] === '' ? null : yuanToCents(String(raw['amountYuan']));
+      values['amount_cents'] = cents === null ? null : String(cents);
+    } else if (values['unit_price_cents'] && values['quantity']) {
+      values['amount_cents'] = String(Number(values['unit_price_cents']) * Number(values['quantity']));
+    }
+
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const uuid = values['uuid'];
+
+      if (uuid) {
+        const before = selectOne(db, 'items', 'uuid = ?', [uuid], { includeInternal: true });
+        if (!before) throw new WorkspaceNotFoundError(`物品 ${uuid}`);
+
+        // 数量改了但没给剩余 → 剩余跟着数量走（不超过原剩余）
+        if (values['quantity'] !== undefined && values['remaining'] === undefined) {
+          const q = Number(values['quantity']);
+          const cur = Number(before['remaining'] ?? 0);
+          if (cur > q) values['remaining'] = String(q);
+        }
+        const updated = updateRow(db, 'items', uuid, values);
+        return { created: false, item: updated };
+      }
+
+      // 缺省值
+      if (!values['quantity']) values['quantity'] = '1';
+      values['remaining'] = values['remaining'] ?? values['quantity'];
+      values['status'] = values['status'] ?? 'in_stock';
+      if (!values['purchased_on']) values['purchased_on'] = today();
+
+      // 内部标识按分类前缀自动生成（界面上不显示，只给命令行定位用）
+      // 生成规则在 core 里只有一份实现
+      if (!values['code']) {
+        values['code'] = nextItemCode(db, String(values['category'] ?? 'other'));
+      } else if (selectOne(db, 'items', 'code = ?', [values['code']])) {
+        throw new Error(`内部标识已存在: ${values['code']}`);
+      }
+
+      let item: Record<string, unknown> | null = null;
+      transaction(db, () => {
+        item = insertRow(db, 'items', values) as unknown as Record<string, unknown>;
+        insertRow(db, 'stock_moves', {
+          item_uuid: String(item['uuid']),
+          moved_on: values['purchased_on']!,
+          qty_delta: values['quantity']!,
+          reason: 'purchase',
+          notes: values['store'] ? `购自 ${values['store']}` : null,
+        });
+      });
+      return { created: true, item: item as unknown as Record<string, unknown> };
+    });
+  });
+
+  // ── 「一组库存」：批量物品的嵌套条目 ──
+
+  handle('stock:add', (wsId, itemUuid, input) => {
+    const values = pickKnownFields('items', asObject(input));
+    delete values['uuid'];
+    delete values['code'];
+    delete values['parent_uuid'];
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const parent = findItemByUuid(db, asString(itemUuid, 'itemUuid'));
+      if (parent['is_bulk'] !== 'true') {
+        throw new Error(`「${String(parent['name'])}」没有开启「批量」，不能配置一组库存`);
+      }
+      const row = addStock(db, parent, values);
+      const { stocks, totals } = toBulkStocks(stocksOf(db, String(parent['uuid'])));
+      return { created: true, stock: row, stocks, totals };
+    });
+  });
+
+  handle('stock:update', (wsId, stockUuid, input) => {
+    const values = pickKnownFields('items', asObject(input));
+    delete values['uuid'];
+    delete values['code'];
+    delete values['parent_uuid'];
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const row = selectOne(db, 'items', 'uuid = ?', [asString(stockUuid, 'stockUuid')], { includeInternal: true });
+      if (!row) throw new WorkspaceNotFoundError(`库存条目 ${String(stockUuid)}`);
+      const parentUuid = row['parent_uuid'] ? String(row['parent_uuid']) : '';
+      if (!parentUuid) throw new Error('这条记录不是库存条目');
+
+      const updated = updateRow(db, 'items', String(stockUuid), values);
+      refreshParentTotals(db, parentUuid);
+      const { stocks, totals } = toBulkStocks(stocksOf(db, parentUuid));
+      return { updated, stocks, totals };
+    });
+  });
+
+  handle('stock:remove', (wsId, stockUuid) => {
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const row = selectOne(db, 'items', 'uuid = ?', [asString(stockUuid, 'stockUuid')], { includeInternal: true });
+      if (!row) throw new WorkspaceNotFoundError(`库存条目 ${String(stockUuid)}`);
+      const parentUuid = row['parent_uuid'] ? String(row['parent_uuid']) : '';
+      const ok = removeStock(db, String(stockUuid));
+      if (!ok) return { removed: false };
+      const { stocks, totals } = parentUuid
+        ? toBulkStocks(stocksOf(db, parentUuid))
+        : { stocks: [], totals: { quantity: 0, remaining: 0, expiresOn: null } };
+      return { removed: true, stocks, totals };
+    });
+  });
+
+  handle('group:list', (wsId, opts) => {
+    const o = opts ? asObject(opts) : {};
+    return withDb(wsId ? asString(wsId, 'wsId') : null, true, (db) => {
+      const entry = wsId ? requireWorkspace(dataDir(), asString(wsId, 'wsId')) : resolveWorkspace(dataDir(), null);
+      const where = [`${TOP_LEVEL} AND status IN ('in_stock','in_use')`];
+      const params: (string | number)[] = [];
+      if (typeof o['category'] === 'string' && o['category']) {
+        where.push('category = ?');
+        params.push(o['category']);
+      }
+      const rows = selectWhere(db, 'items', where.join(' AND ') + ' ORDER BY sort_order ASC, rowid ASC', params);
+
+      // 分组层级与排序字段：界面传优先，否则用工作区里存的偏好
+      const levels = Number(o['levels'] ?? entry.groupLevels ?? 1);
+      const sortField = String(o['sort'] ?? entry.sortField ?? 'manual') as SortField;
+
+      /**
+       * 把原始数据库行补成界面能直接渲染的物品对象。
+       *
+       * `selectWhere` 给的是**裸行**，没有 expiry / isLongTerm / stockCount 这些
+       * 派生字段 —— 界面拿裸行去画会直接抛错（曾经就是这样崩的）。
+       * 所以这里补齐，字段口径与 `item:list` 保持一致。
+       */
+      const counts = stockCounts(db);
+      const decorate = (r: Row) => {
+        const expiresOn = r['expires_on'] ? String(r['expires_on']) : null;
+        const left = expiresOn ? daysUntil(expiresOn) : null;
+        const remaining = Number(r['remaining'] ?? 0);
+        const minStock = Number(r['min_stock'] ?? 0);
+        const expiry = expiriesForItem(r);
+        return {
+          ...r,
+          remaining,
+          minStock,
+          lowStock: minStock > 0 && remaining < minStock,
+          expiresOn,
+          daysLeft: left,
+          daysLeftText: expiresOn ? formatDaysLeft(left) : '长期',
+          isLongTerm: expiry.length === 0,
+          leadDays: leadDaysFor(r),
+          unitPriceYuan: centsToYuan(r['unit_price_cents'] as string | null),
+          amountYuan: centsToYuan(r['amount_cents'] as string | null),
+          stockCount: counts.get(String(r['uuid'])) ?? 0,
+          expiry,
+        };
+      };
+
+      const tree = buildTree(rows, {
+        levels,
+        sort: sortField,
+        order: entry.groupOrder ?? {},
+      });
+
+      // 树里的 items 是裸行，递归补一遍
+      const decorateNode = (n: (typeof tree.nodes)[number]): unknown => ({
+        key: n.key,
+        label: n.label,
+        path: n.path,
+        level: n.level,
+        count: n.count,
+        pinned: n.pinned,
+        expired: n.expired,
+        soon: n.soon,
+        longTerm: n.longTerm,
+        items: n.items.map(decorate),
+        children: n.children.map(decorateNode),
+      });
+
+      return {
+        levels: tree.maxLevel,
+        requestedLevels: Math.max(1, Math.min(3, levels)),
+        sortedBy: sortField,
+        dragEnabled: sortField === 'manual',
+        total: tree.total,
+        uncategorized: uncategorizedCount(rows),
+        groups: tree.nodes.map(decorateNode),
+        collapsed: entry.collapsed ?? [],
+      };
+    });
+  });
+
+  /**
+   * 拖动固定物品顺序。
+   *
+   * 界面把「这一组里物品的新顺序」整份传上来，这里按顺序重写 sort_order。
+   * 传整份而不是「谁移到谁前面」是刻意的：整份重写是幂等的，
+   * 拖动的中间态、重复请求都不会把顺序搞乱。
+   */
+  handle('item:reorder', (wsId, uuids) => {
+    if (!Array.isArray(uuids)) throw new Error('item:reorder 需要一个 uuid 数组');
+    const list = uuids.map((u) => asString(u, 'uuid'));
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const n = applyItemOrder(db, list);
+      return { reordered: n };
+    });
+  });
+
+  /** 拖动固定分组顺序 / 改展开层级 / 改排序字段 / 收起展开 */
+  handle('group:prefs', (wsId, patch) => {
+    const dd = dataDir();
+    const entry = wsId ? requireWorkspace(dd, asString(wsId, 'wsId')) : resolveWorkspace(dd, null);
+    const input = patch ? asObject(patch) : {};
+    const next: Parameters<typeof updateWorkspacePrefs>[2] = {};
+
+    // 组顺序：路径 → 有序 key 列表
+    if (input['order'] !== undefined && typeof input['order'] === 'object' && input['order'] !== null) {
+      const order: Record<string, string[]> = { ...(entry.groupOrder ?? {}) };
+      for (const [path, keys] of Object.entries(input['order'] as Record<string, unknown>)) {
+        if (!Array.isArray(keys)) continue;
+        // 未分类永远置顶：无论界面传什么，都把它从可排序列表里剔掉
+        order[path] = keys.map((k) => String(k)).filter((k) => k !== UNCATEGORIZED);
+      }
+      next.groupOrder = order;
+    }
+    if (input['levels'] !== undefined) next.groupLevels = Number(input['levels']);
+    if (input['sort'] !== undefined) next.sortField = String(input['sort']);
+    if (Array.isArray(input['collapsed'])) next.collapsed = input['collapsed'].map((c) => String(c));
+
+    const updated = updateWorkspacePrefs(dd, entry.id, next);
+    return {
+      id: updated.id,
+      groupOrder: updated.groupOrder ?? {},
+      groupLevels: updated.groupLevels ?? 1,
+      sortField: updated.sortField ?? 'manual',
+      collapsed: updated.collapsed ?? [],
+    };
+  });
+
+  handle('timeline:data', (wsId, opts) => {
+    const o = opts ? asObject(opts) : {};
+    const granularity = typeof o['granularity'] === 'string' ? o['granularity'] : 'month';
+    return withDb(wsId ? asString(wsId, 'wsId') : null, true, (db) => {
+      const rows = selectWhere(db, 'items', `${TOP_LEVEL} AND status IN ('in_stock','in_use')`, []);
+      const now = new Date();
+      const slots = buildSlots(now, granularity, Number(o['past'] ?? 6), Number(o['future'] ?? 24));
+
+      const groups = groupByCategory(rows, now).map((g) => ({
+        key: g.key,
+        label: g.label,
+        entries: g.entries.map((e) => ({
+          itemUuid: String(e.item['uuid'] ?? ''),
+          itemName: String(e.item['name'] ?? ''),
+          kind: e.kind,
+          expiresOn: e.expiresOn,
+          daysLeft: e.daysLeft,
+          daysLeftText: e.daysLeftText,
+          expired: e.expired,
+          slot: slotIndexOf(e.expiresOn, slots),
+          location: [e.item['room'], e.item['container']].filter(Boolean).join(' / '),
+          remaining: Number(e.item['remaining'] ?? 0),
+          isBulk: e.item['is_bulk'] === 'true',
+          unit: e.item['unit'] === null ? '' : String(e.item['unit'] ?? ''),
+        })),
+        longTerm: g.longTerm.map((l) => ({
+          itemUuid: String(l.item['uuid'] ?? ''),
+          itemName: String(l.item['name'] ?? ''),
+          remaining: Number(l.item['remaining'] ?? 0),
+          unit: l.item['unit'] === null ? '' : String(l.item['unit'] ?? ''),
+        })),
+      }));
+
+      return {
+        granularity,
+        today: today(now),
+        slots,
+        categories: groups
+          .map((g) => ({ key: g.key, label: g.label, count: g.entries.length + g.longTerm.length }))
+          .filter((c) => c.count > 0),
+        groups: groups.filter((g) => g.entries.length > 0 || g.longTerm.length > 0),
+        counts: {
+          dated: groups.reduce((n, g) => n + g.entries.length, 0),
+          longTerm: groups.reduce((n, g) => n + g.longTerm.length, 0),
+        },
+      };
+    });
+  });
+
+  handle('item:consume', (wsId, uuid, qty, reason) => {
+    const n = Number(qty);
+    if (!Number.isInteger(n) || n <= 0) throw new Error('扣减数量必须是正整数');
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const key = asString(uuid, 'uuid');
+      const item = selectOne(db, 'items', 'uuid = ?', [key], { includeInternal: true });
+      if (!item) throw new WorkspaceNotFoundError(`物品 ${key}`);
+
+      const remaining = Number(item['remaining'] ?? 0);
+      // 非批量物品是一次性的：不管传多少，一次就是「用掉这一件」
+      const isBulk = item['is_bulk'] === 'true';
+      const nested = isBulk && hasStocks(db, key);
+      const take = isBulk ? n : Math.min(n, remaining);
+      if (take > remaining) throw new Error(`「${String(item['name'])}」剩余 ${remaining}，不足以扣减 ${take}`);
+
+      const newRemaining = remaining - take;
+      const r = typeof reason === 'string' && reason ? reason : 'consume';
+      const terminal =
+        newRemaining === 0
+          ? r === 'discard'
+            ? 'discarded'
+            : r === 'expired_dispose'
+              ? 'expired_disposed'
+              : 'consumed'
+          : 'in_use';
+
+      const taken: { uuid: string; taken: number }[] = [];
+      transaction(db, () => {
+        if (nested) {
+          // 配了「一组库存」：按先到期先出从各组扣，父项数量由子行汇总
+          for (const t of consumeFromStocks(db, key, take)) {
+            taken.push(t);
+            insertRow(db, 'stock_moves', {
+              item_uuid: t.uuid,
+              moved_on: today(),
+              qty_delta: String(-t.taken),
+              reason: r,
+              notes: null,
+            });
+          }
+          refreshParentTotals(db, key);
+        } else {
+          updateRow(db, 'items', key, { remaining: String(newRemaining), status: terminal });
+          insertRow(db, 'stock_moves', {
+            item_uuid: key,
+            moved_on: today(),
+            qty_delta: String(-take),
+            reason: r,
+            notes: null,
+          });
+        }
+      });
+
+      const after = toBulkStocks(stocksOf(db, key));
+
+      return {
+        itemUuid: key,
+        name: item['name'],
+        consumed: take,
+        reason: r,
+        remaining: nested ? after.totals.remaining : newRemaining,
+        status: terminal,
+        isBulk,
+        fromStocks: taken.length > 0 ? taken : null,
+      };
+    });
+  });
+
+  /**
+   * 一键清理：删掉这个工作区里所有「非批量且剩余为 0」的记录。
+   *
+   * dryRun=true 只返回清单，不落库 —— 界面先弹确认框用。
+   */
+  handle('item:purgeSpent', (wsId, dryRun) => {
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const rows = selectWhere(db, 'items', `is_bulk = 0 AND remaining <= 0`, []);
+      const list = rows.map((r) => ({
+        uuid: String(r['uuid']),
+        code: String(r['code'] ?? ''),
+        name: String(r['name'] ?? ''),
+        category: String(r['category'] ?? ''),
+        location: [r['room'], r['container']].filter(Boolean).join(' / '),
+      }));
+
+      if (dryRun === true) return { purged: 0, items: list, dryRun: true };
+
+      transaction(db, () => {
+        for (const it of list) deleteRow(db, 'items', it.uuid);
+      });
+      return { purged: list.length, items: list, dryRun: false };
+    });
+  });
+
+  handle('item:delete', (wsId, uuid) => {
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const ok = deleteRow(db, 'items', asString(uuid, 'uuid'));
+      if (!ok) throw new WorkspaceNotFoundError(`物品 ${String(uuid)}`);
+      return { deleted: true };
+    });
+  });
+
+  // ── 到期概览（v3：按分类分组 + 组内按到期时间排序，不再分级）──
+  handle('alert:summary', (wsId) => {
+    const dd = dataDir();
+    const entry = wsId ? requireWorkspace(dd, asString(wsId, 'wsId')) : resolveWorkspace(dd, null);
+    const overview = computeOverview(entry, workspaceDbPath(dd, entry));
+
+    const db = openDatabase(workspaceDbPath(dd, entry), { readOnly: true });
+    let lowStock: {
+      itemUuid: string;
+      itemName: string;
+      category: string;
+      remaining: number;
+      minStock: number;
+      shortfall: number;
+      unit: string;
+    }[] = [];
+    try {
+      const rows = selectWhere(db, 'items', `${TOP_LEVEL} AND status IN ('in_stock','in_use')`, []);
+      lowStock = lowStockItems(rows).map((x) => ({
+        itemUuid: String(x.item['uuid'] ?? ''),
+        itemName: String(x.item['name'] ?? ''),
+        category: String(x.item['category'] ?? ''),
+        remaining: x.remaining,
+        minStock: x.minStock,
+        shortfall: x.shortfall,
+        unit: x.item['unit'] === null ? '' : String(x.item['unit'] ?? ''),
+      }));
+    } finally {
+      db.close();
+    }
+
+    return {
+      workspaceId: overview.workspaceId,
+      workspaceName: overview.workspaceName,
+      generatedAt: overview.generatedAt,
+      today: overview.today,
+      counts: overview.counts,
+      headline: overview.headline,
+      // 分组结构直接给界面：每组里的 entries 已经按到期日升序排好
+      groups: overview.groups.map((g) => ({
+        key: g.key,
+        label: g.label,
+        counts: g.counts,
+        entries: g.entries.map((e) => ({
+          itemUuid: String(e.item['uuid'] ?? ''),
+          itemName: String(e.item['name'] ?? ''),
+          kind: e.kind,
+          expiresOn: e.expiresOn,
+          daysLeft: e.daysLeft,
+          daysLeftText: e.daysLeftText,
+          expired: e.expired,
+          category: String(e.item['category'] ?? ''),
+          brand: e.item['brand'] === null ? null : String(e.item['brand'] ?? ''),
+          location: [e.item['room'], e.item['container']].filter(Boolean).join(' / '),
+          remaining: Number(e.item['remaining'] ?? 0),
+          quantity: Number(e.item['quantity'] ?? 0),
+          isBulk: e.item['is_bulk'] === 'true',
+          unit: e.item['unit'] === null ? '' : String(e.item['unit'] ?? ''),
+        })),
+        longTerm: g.longTerm.map((l) => ({
+          itemUuid: String(l.item['uuid'] ?? ''),
+          itemName: String(l.item['name'] ?? ''),
+          category: String(l.item['category'] ?? ''),
+          brand: l.item['brand'] === null ? null : String(l.item['brand'] ?? ''),
+          location: [l.item['room'], l.item['container']].filter(Boolean).join(' / '),
+          remaining: Number(l.item['remaining'] ?? 0),
+          quantity: Number(l.item['quantity'] ?? 0),
+          isBulk: l.item['is_bulk'] === 'true',
+          unit: l.item['unit'] === null ? '' : String(l.item['unit'] ?? ''),
+        })),
+      })),
+      lowStock,
+    };
+  });
+
+  handle('alert:multi', () => {
+    const dd = dataDir();
+    return listWorkspaces(dd).map((entry) => {
+      const s = computeOverview(entry, workspaceDbPath(dd, entry));
+      return { workspaceId: entry.id, name: entry.name, counts: s.counts, headline: s.headline };
+    });
+  });
+
+  // ── 导入导出 ──
+  handle('io:export', async (wsId) => {
+    const dd = dataDir();
+    const entry = wsId ? requireWorkspace(dd, asString(wsId, 'wsId')) : resolveWorkspace(dd, null);
+    const safe = entry.name.replace(/[\\/:*?"<>|]/g, '_');
+    const result = await dialog.showSaveDialog({
+      title: '导出工作区',
+      defaultPath: join(app.getPath('documents'), `${safe}.zip`),
+      filters: [{ name: 'DSH Inventory 归档', extensions: ['zip'] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    const out = exportWorkspace(dd, entry, { outPath: result.filePath });
+    return {
+      canceled: false,
+      archivePath: out.archivePath,
+      bytesText: formatBytes(out.bytes),
+      fileCount: out.fileCount,
+      rowCounts: out.rowCounts,
+    };
+  });
+
+  handle('io:previewImport', async () => {
+    const picked = await dialog.showOpenDialog({
+      title: '选择要导入的归档',
+      properties: ['openFile'],
+      filters: [{ name: 'DSH Inventory 归档', extensions: ['zip'] }],
+    });
+    if (picked.canceled || picked.filePaths.length === 0) return { canceled: true };
+    const preview = previewArchive(picked.filePaths[0]!);
+    return {
+      canceled: false,
+      archivePath: picked.filePaths[0]!,
+      workspaceName: preview.workspaceName,
+      exportedAt: preview.manifest.exportedAt,
+      formatVersion: preview.manifest.formatVersion,
+      schemaVersion: preview.manifest.schemaVersion,
+      checksumVerified: preview.checksumVerified,
+      totalRows: preview.totalRows,
+      errorCount: preview.errorCount,
+      warningCount: preview.warningCount,
+      tables: preview.tables,
+      issues: preview.issues.slice(0, 100),
+    };
+  });
+
+  handle('io:import', (archivePath, name) => {
+    const dd = dataDir();
+    const opts: Parameters<typeof importArchive>[1] = { dataDir: dd };
+    if (typeof name === 'string' && name.trim()) opts.name = name.trim();
+    const result = importArchive(asString(archivePath, 'archivePath'), opts);
+    return {
+      ok: result.ok,
+      workspaceId: result.workspaceId,
+      workspaceName: result.workspaceName,
+      rowCounts: result.rowCounts,
+      errorCount: result.preview.errorCount,
+      issues: result.preview.issues.slice(0, 100),
+    };
+  });
+
+  handle('io:openPath', async (target) => {
+    const p = asString(target, 'path');
+    if (!existsSync(p)) throw new Error(`路径不存在: ${p}`);
+    await shell.openPath(p);
+    return { opened: true };
+  });
+
+  handle('io:revealPath', (target) => {
+    const p = asString(target, 'path');
+    if (!existsSync(p)) throw new Error(`路径不存在: ${p}`);
+    shell.showItemInFolder(p);
+    return { revealed: true };
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// 时间轴：分格
+// ─────────────────────────────────────────────────────────────
+
+interface Slot {
+  start: string;
+  end: string;
+  label: string;
+  current: boolean;
+}
+
+function isoOf(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
+
+function monthEndOf(ym: string): string {
+  const [y, m] = ym.split('-').map(Number);
+  const d = new Date(y!, m!, 0);
+  return isoOf(d);
+}
+
+/** 生成时间格，覆盖 [今天 - past 月, 今天 + future 月] */
+function buildSlots(now: Date, granularity: string, monthsBack: number, monthsAhead: number): Slot[] {
+  const todayStr = today(now);
+  const slots: Slot[] = [];
+
+  if (granularity === 'year') {
+    const y0 = now.getFullYear() - Math.ceil(monthsBack / 12);
+    const y1 = now.getFullYear() + Math.ceil(monthsAhead / 12);
+    for (let y = y0; y <= y1; y += 1) {
+      slots.push({ start: `${y}-01-01`, end: `${y}-12-31`, label: `${y}`, current: y === now.getFullYear() });
+    }
+    return slots;
+  }
+
+  if (granularity === 'month') {
+    for (let i = -monthsBack; i <= monthsAhead; i += 1) {
+      const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+      const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      slots.push({
+        start: `${ym}-01`,
+        end: monthEndOf(ym),
+        label: ym,
+        current: d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth(),
+      });
+    }
+    return slots;
+  }
+
+  if (granularity === 'week') {
+    // 以本周一为基准，前后展开
+    const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    base.setDate(base.getDate() - ((base.getDay() + 6) % 7));
+    const back = Math.ceil((monthsBack * 30) / 7);
+    const ahead = Math.ceil((monthsAhead * 30) / 7);
+    for (let i = -back; i <= ahead; i += 1) {
+      const s = new Date(base);
+      s.setDate(s.getDate() + i * 7);
+      const e = new Date(s);
+      e.setDate(e.getDate() + 6);
+      const ss = isoOf(s);
+      const ee = isoOf(e);
+      slots.push({
+        start: ss,
+        end: ee,
+        label: `${ss.slice(5)}~${ee.slice(5)}`,
+        current: todayStr >= ss && todayStr <= ee,
+      });
+    }
+    return slots;
+  }
+
+  // day：以今天为中心，前后各展开半个月数
+  const span = Math.round(((monthsBack + monthsAhead) * 30) / 2);
+  const base = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  for (let i = -span; i <= span; i += 1) {
+    const d = new Date(base);
+    d.setDate(d.getDate() + i);
+    const s = isoOf(d);
+    slots.push({ start: s, end: s, label: s.slice(5), current: s === todayStr });
+  }
+  return slots;
+}
+
+function slotIndexOf(date: string, slots: Slot[]): number {
+  for (let i = 0; i < slots.length; i += 1) {
+    const s = slots[i]!;
+    if (date >= s.start && date <= s.end) return i;
+  }
+  return -1;
+}
+
+/** 按 uuid 取一条物品，找不到就抛「未找到」 */
+function findItemByUuid(db: ReturnType<typeof openDatabase>, uuid: string): Row {
+  const row = selectOne(db, 'items', 'uuid = ?', [uuid], { includeInternal: true });
+  if (!row) throw new WorkspaceNotFoundError(`物品 ${uuid}`);
+  return row;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 启动
+// ─────────────────────────────────────────────────────────────
+
+// 同一时间只允许一个实例：两个进程同时写同一个 SQLite 虽然安全（WAL），
+// 但用户会看到两个窗口在互相刷新，体验很差
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+
+  app.whenReady().then(() => {
+    Menu.setApplicationMenu(null);
+    registerHandlers();
+    createWindow();
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}
+
+export { dataDir };

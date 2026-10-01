@@ -1,0 +1,56 @@
+{
+  "name": "dsh-inventory",
+  "version": "0.1.0",
+  "private": true,
+  "description": "家庭物品管理 - 多工作区、独立 SQLite、完整命令行工具 + 桌面界面",
+  "main": "dist/main/main.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.renderer.json --noEmit",
+    "start": "npm run build && electron .",
+    "cli": "node dist/cli/main.js",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "test:func": "npm run build && node scripts/functest.mjs",
+    "test:gui": "npm run build && electron scripts/guitest.cjs",
+    "test:all": "npm run test && node scripts/functest.mjs",
+    "dist:win": "npm run build && electron-builder --win"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.0",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "typescript": "7.0.2"
+  },
+  "build": {
+    "appId": "com.dsh.inventory",
+    "productName": "DSH Inventory",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/main/**/*",
+      "dist/preload/**/*",
+      "dist/renderer/**/*",
+      "dist/core/**/*",
+      "dist/cli/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ],
+      "artifactName": "DSH-Inventory-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "DSH Inventory"
+    }
+  }
+}

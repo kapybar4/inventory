@@ -1,0 +1,752 @@
+# DSH Inventory
+
+家庭物品管理。**多工作区、每个工作区一个独立 SQLite 文件、一个完整的命令行工具。**
+
+核心不是"把东西记下来"，而是**快过期时主动告诉你** —— 所以 `alert list` 与桌面端顶部横幅是这套东西存在的理由，数据库只是它的存储引擎。
+
+---
+
+## 快速开始
+
+```bash
+git clone <这个仓库>
+cd inventory
+npm.cmd install              # 依赖只有 typescript / electron / electron-builder
+npm.cmd run build            # 编译到 dist/
+
+npm.cmd run cli -- --help    # 命令行工具（功能与界面完全对等）
+npm.cmd run cli -- init --name "我的家"        # 首次初始化（默认写入演示数据）
+npm.cmd run cli -- alert list                  # 看看快到期的东西
+
+npm.cmd start                # 桌面界面（可选）
+```
+
+验证环境是否正常：
+
+```bash
+npm.cmd run typecheck   # 两套 tsconfig
+npm.cmd test            # 58 项单元测试
+npm.cmd run test:func   # 89 项 CLI 功能测试
+```
+
+> **Windows 注意**：如果执行策略禁止 `npm.ps1`，请用 `npm.cmd`
+> （或 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 一次解决）。
+>
+> 另外本机若设了 `ELECTRON_RUN_AS_NODE=1`，Electron 会以 Node 模式启动而不开窗口。
+> 启动界面前清掉：`$env:ELECTRON_RUN_AS_NODE = $null`。
+
+### 用一个隔离数据目录先试
+
+不污染正式数据：
+
+```bash
+$env:DSH_INVENTORY_HOME = "$env:TEMP\inv-demo"   # PowerShell
+npm.cmd run cli -- init --name "我的家"
+npm.cmd run cli -- alert list
+```
+
+### 这个仓库里没有任何真实数据
+
+`DSH_INVENTORY_HOME` 默认指向**用户主目录**下的应用数据目录，不在仓库里。
+仓库自带的演示数据是程序生成的虚构物品（`src/core/seed.ts`），
+`.gitignore` 也把 `_demo/`、`*.db`、`*.zip` 全部排除。
+
+如果你 fork 后要提交，先确认 `git status` 里没有自己的 `data.db` 与导出归档 ——
+那里面有你的药品、证件与序列号。
+
+---
+
+## 为什么是这个形态
+
+| 需求 | 做法 |
+| --- | --- |
+| 多个**完全隔离**的存储空间 | 一个工作区 = 一个目录 = 一个 `.db` 文件。隔离靠文件系统，不靠 `WHERE workspace_id`，所以不可能因漏写条件而串数据 |
+| 同一物品出现在两个工作区 | 允许且无影响。工作区之间互不感知，`MED-0001` 在两个库里是两个独立的东西 |
+| 导入导出的单位是工作区 | 导出 = 打包某个工作区；**导入 = 新建一个工作区**，永不修改已有工作区 |
+| 让 agent 能自动导入 | CLI + 统一 JSON 信封 + 稳定退出码 + `--dry-run` + 纯 stdout/stderr 分离 |
+| 快过期能发现 | 分类阈值 + 关键物品放大 + 三类到期日（保质期 / 质保期 / 开封后有效期） |
+
+**"导入 = 新建"这个约束消灭了最麻烦的一整块逻辑**：没有合并冲突、不需要判断谁的 `updated_at` 更新、失败时删掉刚建的目录就等于什么都没发生。
+
+---
+
+## 数据模型：一行 = 一件实际存在的东西
+
+这是这个项目最重要的一条设计决定，也是改过一版的地方。
+
+**早期版本有「物品 + 批次」两层**：物品存名称品牌，批次存购买日期、到期日、价格。
+理由是「同一种药分两次买，到期日不同」。但家庭场景里没有「批次」这个概念 ——
+用户看到的是一盒药，不是一个批次记录。
+
+现在**只有一层**：
+
+```
+items  一行 = 一件看得见摸得着的东西，自己带购买日期、到期日、价格、数量
+stock_moves  出入库流水（消耗 / 领用 / 丢弃 / 过期处理的审计线索）
+```
+
+同一件东西买两次 = **两条独立记录**，各自管自己的到期日。
+
+| 这样做的收益 | 说明 |
+| --- | --- |
+| 界面直白 | 一行就是一件东西，不用「展开看批次」 |
+| 提醒更简单 | 直接按物品行算，不需要先聚合再判断 |
+| 导入导出更小 | 少一张表、少一层外键、少一个 CSV 文件 |
+| 没有歧义 | 「这件东西还剩几个」只有一个答案 |
+
+旧版归档（含 `batches` 表）导入时会**自动迁移**：每个批次展开成一条独立物品记录，
+继承原物品的名称、品牌、分类、位置等属性。迁移走标准的「建新表 → 搬数据 → 换名」，
+因而旧库里缺列也不会崩。有针对这条路径的回归测试。
+
+### 「批量」是要单独开启的属性
+
+家里大多数东西**就是一件**：一瓶洗发水、一个鼠标、一本护照。给它们填「数量 3」
+既没意义也容易填错。所以默认**不是**批量的：
+
+| | 普通物品（默认） | 批量物品（`--bulk` / 勾选「批量」） |
+| --- | --- | --- |
+| 数量 | 恒为 **1**，界面上置灰不可改 | 可设，如 24 |
+| 操作 | **消耗** —— 点一下数量归 0 | 领用 N 个，可多次 |
+| 最低库存 | 无意义（自动为 0） | 可设，低于即进待补货 |
+| 补货提醒 | 不参与 | 参与 |
+| 典型例子 | 药品、护照、保单、滤芯、鼠标 | 抽纸、洗衣凝珠、电池、口罩、咖啡豆 |
+
+这条不变量**在写入层强制**，不只是界面上禁用输入 ——
+否则 CLI、JSON 批量录入、CSV 导入都能绕过去：
+
+- 非批量物品：`quantity` 一律钉为 1，`remaining` 只可能是 1 或 0，`min_stock` 归 0
+- 部分更新时会带上库里的旧值判断，所以「只改名字」不会把批量物品误判成非批量、把数量抹掉
+
+### 取消编号、取消到期类型
+
+两处「让用户做选择但选择没有价值」的地方被删掉了：
+
+| 取消了 | 为什么 | 现在怎么表达 |
+| --- | --- | --- |
+| **物品编号**（`MED-0001`） | 家庭场景里没人会去记编号，填起来还是负担 | 内部保留一个标识供命令行定位；**界面完全不显示，导出包里也没有**，导入时按分类前缀重新生成 |
+| **到期类型**（精确到日 / 只到月份 / 无到期） | 三选一的问题其实是「你到底知不知道是哪天」 | 填了日期就是那一天；不填就是**长期**。只印到月份就填那个月的最后一天 |
+
+### 品牌 / 型号 / 规格：三个选填字段，各说各的
+
+录东西的时候最容易被混在一起的就是这三个。它们的分工是明确的：
+
+| 字段 | 回答的问题 | 例子 |
+| --- | --- | --- |
+| **品牌** | 谁做的 | 芬必得 / Anker / 罗技 |
+| **型号** | 是哪一款 | MX Master 3S / A1287 / M8R-FLP |
+| **规格** | 这一份有多大 | 0.3g×20粒 / 20000mAh / 3层×120抽 |
+
+三个**都是选填**，而且互不干扰：只填品牌、只填型号、只填规格、三个都填、
+一个都不填 —— 都完全正常，任何一个不会被另一个带着走或覆盖掉。
+
+一视同仁地给所有物品开放，不做「数码才显示型号」这种按分类收窄 ——
+多一栏空的输入框，代价远小于「我需要填的时候它偏偏不在这」。
+
+型号会进导出包并原样还原（对空值敏感：原本是空的，导入后还得是空的，
+不能变成空字符串）。搜索框也认它：`item list --search 'MX Master'` 能命中。
+
+### 「长期」是一种状态，不是一个档位
+
+没有到期日的物品（护照、鼠标、雨伞）统一叫**长期**：
+
+- 不参与任何到期计算，不会出现在「已过期 / 30 天内」的计数里
+- 在分组页沉到每组末尾，一行灰字带过；时间轴上单独一行
+- 这个状态是从「有没有到期日」**算出来的**，不是另一个要用户填的字段
+
+### 取消提醒分级：改成「分组 + 排序」
+
+早先有「已过期 / 紧急 / 临期 / 关注 / 待补货」五档。实测下来档位边界
+（21 天算紧急还是临期）对用户没有意义，真正有用的信息只有两条：
+**过没过期**、**还剩多少天**。
+
+所以现在：
+
+- **只有「已过期」一个标记**，其余靠**排序**本身表达优先级
+- 分档列表换成**分组 + 组内排序**
+- 「待补货」仍然单独一段 —— 它是另一件事（数量不够），不是到期问题
+
+### 分组、排序、手动顺序：三件互相独立的事
+
+这三条规则各管各的，界面上也刻意让人一眼看出**现在哪条在生效**。
+
+| | 是什么 | 怎么改 |
+| --- | --- | --- |
+| **分组** | 分类 → 子类 → 标签，最多**三级** | 层级按钮 1 / 2 / 3。**一级默认开启且不可关闭** |
+| **排序** | 组内物品按哪个字段排 | 「开启排序」开关 + 字段下拉。**默认关闭** |
+| **手动顺序** | 默认状态下你拖动固定下来的顺序 | 拖物品行（排序关闭时才可拖） |
+
+三条的相互关系：
+
+- **排序只影响组内物品的顺序**。它不改分组、不改组之间的顺序，
+  也不动 `sort_order` —— 所以关掉排序就**原样回到**你手工摆好的样子
+- **开启排序时拖动被禁用**，手柄直接从界面上消失。拖了也会被立刻覆盖，
+  留着能拖的状态只会让人以为坏了
+- **组顺序按层各自独立**：每一级都能拖，拖动结果存在工作区注册表里
+
+排序字段（`dsh-inv sort fields` 也能列）：
+
+| 字段 | 方向 | 说明 |
+| --- | --- | --- |
+| `manual` | — | 默认。按你拖动固定下来的顺序 |
+| `expiry` | 升序 | 最先到期的排最前，长期在最后 |
+| `name` | 升序 | |
+| `purchased` | 降序 | 最近买的排最前 |
+| `quantity` / `remaining` | 降序 | 数量多的排最前 |
+| `location` | 升序 | 房间 + 柜格 |
+| `price` | 降序 | 贵的排最前 |
+| `created` | 降序 | 最近添加的排最前 |
+
+### 「未分类」：置顶、不可拖，专门用来催你去分类
+
+分类**可以留空**，留空就是未分类。这一组：
+
+- **永远在所有分组之上**，无论排序字段是什么、无论组顺序怎么拖
+- **不可拖动**，界面上没有拖动手柄，只有一个 📌
+- 顶部还会有一条提示条告诉你还有几件没分类
+
+这么设计是刻意的：如果未分类能像别的组一样被拖到角落藏起来，
+「还没想好放哪」就会变成一个可以无限拖延的状态。
+置顶 + 不可动，等于每次打开分组页都会被提醒一次。
+
+命令行里 `item add --unclassified` 会把分类显式清空，
+`item list` 结尾也会提示还有几件未分类。
+
+### 顺序号（`sort_order`）
+
+每条物品有一个**不展示的序号** `sort_order`，它就是默认状态下的排列位置。
+
+- 界面上不显示这个数，显示的是它在列表里的**位次**（分组页物品行最左边那列）
+- 新加的物品自动排到末尾
+- 拖动、`item reorder` 改的都是它
+- 排序开启时它被忽略但**保留**，所以随时关掉排序都能回到原样
+- 拖动落库是**整份覆盖**而不是「移到谁前面」：整份重写是幂等的，
+  拖动的中间态、重复请求都不会把顺序搞乱
+
+```bash
+dsh-inv item reorder 护照                 # 移到最前
+dsh-inv item reorder 雨伞 --after 布洛芬  # 插到某条之后
+dsh-inv group list --levels 3             # 三级分组
+dsh-inv group list --sort expiry          # 组内按到期时间
+dsh-inv group list --order '=daily,medicine'   # 固定第一层的组顺序（会存下来）
+```
+
+### 「一组库存」：批量物品的嵌套条目
+
+一件开启「批量」的物品，如果**分几次买、每批到期日不同**，可以拆成若干条**库存条目**，
+每条自带数量与到期日：
+
+```
+抽纸巾（批量）
+├─ #1  10 包  到期 2029-04-30  山姆
+├─ #2   8 包  到期 2030-04-30  山姆
+└─ #3   6 包  长期             京东
+   合计 20 / 24 包，父项到期日取「还有剩余的组里最早的那个」
+```
+
+不拆也行 —— 单次买入的批量物品直接用自己的数量与到期日就够了。
+需要分开管到期日时再拆（界面上是「拆成一组库存」，命令行是 item stock add）。
+
+- **领用按先到期先出（FEFO）**：从上往下依次扣，先到期的那组先扣光
+- 父项的数量、剩余、到期日**全部由库存条目汇总**，不单独维护；
+  某组用光后，父项的到期日自动变成下一组，不会抱着一组空库存报「快到期了」
+- 实现上库存条目就是 `items` 里 `parent_uuid` 指向父项的子行，
+  所以归档格式仍然只有两张表，往返不变式不用为它开特例
+
+### 时间轴
+
+把「到期」这件事放到横向时间上看：横轴是按粒度（日 / 周 / 月 / 年）切好的时间格，
+每行一件物品，到期日落在哪一格就画在哪一格。
+
+- 可以横向拉动；切到这一页时会自动滚到「今天」那一格并居中
+- 鼠标悬停时**整列高亮**，工具栏同时显示这一格的日期范围与「有几项到期」
+- 支持**按分类筛选**，只看某一类
+- 长期物品不占时间格，单独一行
+
+```bash
+dsh-inv timeline --granularity month --category medicine
+dsh-inv group list --sort expiry
+```
+
+### 一键清理已消耗完的记录
+
+普通物品消耗完（数量 0）之后，留着只会让列表变长。
+工作区页会出现 **「清理已用完 (N)」** 按钮，点开先列出要删的清单再确认；
+命令行是 `item purge`：
+
+```bash
+dsh-inv item purge --dry-run   # 先看清单
+dsh-inv item purge --yes       # 执行
+```
+
+**批量物品即使数量为 0 也不会被清掉** —— 它可能需要补货，或者留作记录。
+
+---
+
+## 技术选型（已实测确认）
+
+| 项 | 版本 | 说明 |
+| --- | --- | --- |
+| TypeScript | **7.0.2** | 原生 Go 编译器（本机 `tsc.exe` 23 MB）。注意它**移除了 `moduleResolution: node10/classic`**，配置已相应调整 |
+| Electron | **44.5.1** | Chromium 152 / Node 24.21 / ABI 149 |
+| SQLite | **`node:sqlite`（内置）** | Electron 44 自带。**因此没有任何原生模块**：不需要 `@electron/rebuild`、不需要 `asarUnpack`、也没有 ABI 升级重编译问题 |
+| 运行时依赖 | **0 个** | CSV 解析、参数解析、zip 打包全部自己实现或调用系统能力 |
+| 打包 | `electron-builder` 26.15.3 | 开发依赖，仅用于出安装包 |
+
+### ⚠️ 一个必须知道的环境陷阱
+
+本机全局设了 `ELECTRON_RUN_AS_NODE=1`。它会让 Electron 退化成纯 Node 运行
+（`require('electron').app` 变成 `undefined`），开发时表现为"启动就静默退出"。
+
+```powershell
+$env:ELECTRON_RUN_AS_NODE = $null   # 启动 Electron 前清掉
+```
+
+
+---
+
+## 两种入口，一套 core
+
+同一个 `src/core/`，两种使用方式。领域逻辑只写一遍。
+
+| 入口 | 命令 | 适用场景 |
+| --- | --- | --- |
+| **命令行** | `npm.cmd run cli -- <命令>` | **完整功能**：录入、查询、导入导出、统计、维护 |
+| **桌面界面** | `npm.cmd start` | 想在图形界面里点选、看照片时 |
+
+**命令行是完整接口，不是桌面端的附属品。** 桌面端能做的每一件事，命令行都能做：
+
+| 桌面端操作 | 命令行 |
+| --- | --- |
+| 新建 / 切换 / 编辑 / 删除工作区 | `ws create` / `ws use` / `ws rename` / `ws rm` |
+| 新建物品、填所有字段与复选框 | `item add`（`--critical` / `--prescription` 对应勾选框） |
+| 编辑物品（含数量、到期日、价格） | `item update` |
+| 开启 / 关闭「批量」 | `item add --bulk` / `item update --bulk` / `--no-bulk` |
+| 一键清理已消耗完的 | `item purge` |
+| 删除物品 | `item rm` |
+| 打开物品看详情与流水 | `item show` |
+| 消耗 / 领用 / 丢弃 / 过期处理 | `item consume --reason consume\|discard\|expired_dispose` |
+| 分组页（三级分组、拖动排序） | `group list` / `item reorder` |
+| 时间轴页（粒度 / 分类筛选 / 悬停高亮） | `timeline` |
+| 待补货清单 | `alert list` 的「待补货」段 |
+| 导出工作区 | `export` |
+| 导入前预览报告 | `import --dry-run` |
+| 导入为新工作区 | `import` |
+| 工作区统计 | `ws stats` |
+| 一致性自检 | `ws verify` |
+| 数据目录 / 版本信息 | `info` |
+| 字段与格式页 | `schema show` |
+| 分类预警阈值 | `enums` |
+
+命令行还多出几件界面上做不了的事：**批量录入**（`--json-file` / `--stdin`）、
+**筛选查询**（`--expiring N` / `--low-stock` / `--status`）、`--dry-run` 预演、
+以及所有命令的 `--json` 机器输出。
+
+---
+
+## 命令行工具
+
+```
+dsh-inv <命令> [选项]
+```
+
+**默认输出人读表格**；加 `--json` 才输出机器可解析的单个 JSON 对象。
+
+```console
+$ dsh-inv alert list --within 30
+
+✖ 已过期 ───────────────────────────────────────────────────── 2 项
+  类型          名称                              到期日      剩余          位置
+  ────────────  ────────────────────────────────  ──────────  ────────────  ────────────────
+  保质期        布洛芬缓释胶囊                    2026-07-31  已过期 62 天  客厅 / 药箱-上层
+  开封后有效期  对乙酰氨基酚口服混悬液（儿童） ★  2026-09-21  已过期 10 天  客厅 / 药箱-上层
+
+▲ 紧急 ─────────────────────────────────────────────────────── 2 项
+  类型          名称              到期日      剩余      位置
+  ────────────  ────────────────  ──────────  ────────  ─────────────────
+  开封后有效期  左氧氟沙星滴眼液  2026-10-07  剩 6 天   卧室 / 床头柜抽屉
+
+○ 待补货 ───────────────────────────────────────────────────── 3 项
+  编码      名称          在库  下限   缺
+  ────────  ────────────  ────  ────  ───
+  DEV-0001  医用外科口罩     2     5    3
+```
+
+### 命令一览
+
+```
+dsh-inv info                                  应用与数据目录概况
+dsh-inv init [--name 名称] [--no-seed]        初始化数据目录与第一个工作区
+
+工作区
+  ws list                                     列出所有工作区
+  ws create --name 名称 [--seed]              新建工作区
+  ws show [工作区]                            详情 + 提醒摘要
+  ws stats [工作区]                           按分类 / 状态 / 房间分布、金额合计
+  ws verify [工作区]                          完整性 / 外键 / 结构版本自检
+  ws use <工作区>                             设为默认
+  ws rename <工作区> <新名称>                 重命名
+  ws rm <工作区> --yes                        删除（默认先留数据库快照）
+  ws seed [工作区]                            写入演示数据
+
+物品（一行 = 一件实际存在的东西）
+  item add --name 名称 [字段选项]             新增（--brand/--model/--spec 均选填）
+  item list [筛选] [--limit N]                列出物品
+  item show <uuid|code>                       完整信息：字段 + 到期情况 + 出入库流水
+  item update <uuid|code> [字段选项]          修改字段（含数量、到期日、价格）
+  item consume <uuid|code> [--qty N]          消耗 / 领用 / 丢弃 / 过期处理
+  item reorder <物品>... [--after <物品>]     固定物品在默认状态下的位置（等于拖动）
+  item stock <list|add|rm> <物品>             管理批量物品的「一组库存」
+  item purge [--dry-run] [--yes]              一键清理「已消耗完」的普通物品
+  item rm <uuid|code> [更多...] --yes         删除记录（连带流水）
+
+分组 / 时间轴
+  group list [--levels 1|2|3] [--sort 字段]   三级分组 + 组内排序
+  sort fields                                 列出可用的排序字段
+  timeline [--granularity day|week|month|year] 时间轴数据（支持 --category）
+
+提醒与格式
+  alert list [--within N] [--all]             按分类分组的到期清单 / 待补货
+  schema show                                 归档格式的完整字段说明
+  enums                                       枚举取值与分类预警阈值
+
+导入导出
+  import <归档.zip> [--name 名称] [--dry-run] 导入为**新**工作区
+  export [工作区] [-o 输出.zip]               导出为归档
+```
+
+全局选项：`--json` · `--ws <工作区>` · `--data-dir <路径>` · `--quiet` · `--yes` · `--dry-run` · `--help`
+
+### 常见用法
+
+```bash
+# 录入：一件东西就是一条记录，价格与到期日都记在它自己身上
+# 药品是「一件」，不需要写 --qty（写了也会被钉回 1）
+dsh-inv item add --name "布洛芬缓释胶囊" -c medicine --brand "芬必得" --spec "0.3g×20粒" \
+                 --unit 盒 --room 客厅 --container 药箱-上层 \
+                 --expires-ym 2027-03 --unit-price 19.30 --store 京东健康
+
+# 同一个东西又买了一盒、到期日不同 → 再 add 一条，两条各自管自己的到期
+dsh-inv item add --name "布洛芬缓释胶囊" -c medicine --expires-on 2026-10-15
+
+# 批量物品：确实要按个数管理时才开 --bulk，这时数量才有意义
+dsh-inv item add --name "抽纸巾" -c daily --bulk --qty 24 --remaining 24 --min-stock 6
+
+# 查：30 天内到期的、低于下限的
+dsh-inv alert list --within 30
+dsh-inv item list --low-stock
+dsh-inv item list --expiring 60 --category medicine
+
+# 用：普通物品一次消耗掉；批量物品可领用若干
+dsh-inv item consume MED-0001                              # 数量归 0
+dsh-inv item consume DAY-0001 --qty 3                      # 24 → 21
+dsh-inv item consume MED-0002 --reason expired_dispose     # 过期处理
+
+# 一键清理已消耗完的普通物品（批量物品不会被清）
+dsh-inv item purge --dry-run
+dsh-inv item purge --yes
+
+# 批量录入：写一个 JSON 数组文件
+dsh-inv item add --json-file 购物清单.json
+cat 购物清单.json | dsh-inv item add --stdin
+
+# 维护
+dsh-inv ws stats
+dsh-inv ws verify
+dsh-inv export -o D:\备份\家当.zip
+dsh-inv import D:\备份\家当.zip --dry-run      # 先看报告
+dsh-inv import D:\备份\家当.zip --name "父母家"
+```
+
+批量录入的 JSON（键名同时接受列名与驼峰写法）：
+
+```json
+[
+  { "name": "创可贴", "category": "medical_device", "brand": "云南白药",
+    "spec": "100片/盒", "unit": "盒", "room": "客厅", "container": "药箱-下层",
+    "qty": 1, "minStock": 1, "expiresYm": "2028-06", "unitPrice": "29.90" },
+  { "name": "洗手液", "category": "daily", "brand": "蓝月亮",
+    "unit": "瓶", "room": "卫生间", "qty": 2, "remaining": 2, "minStock": 2,
+    "notes": "补充装在储物间" }
+]
+```
+
+支持的键（列名或驼峰都可以）：`name` `category` `brand` `spec` `unit` `barcode` `room`
+`container` `qty`/`quantity` `remaining` `minStock` `unitPrice` `amount` `store`
+`purchasedOn` `expiresOn` `expiresYm` `openedOn` `openShelfLifeDays` `warrantyMonths`
+`warrantyUntil` `serial` `status` `critical` `prescription` `tags` `notes`
+
+### 给脚本与 agent 的约定
+
+1. **`--json` 时 stdout 只有一个 JSON 对象**，日志全部走 stderr
+2. 统一信封：
+
+   ```json
+   { "ok": true, "data": { }, "warnings": [], "meta": { "app": "DSH Inventory", "tookMs": 42 } }
+   ```
+
+3. **稳定退出码**：`0` 成功 / `1` 运行错误 / `2` 参数错误 / `3` 数据校验失败 / `4` 未找到
+4. 所有写操作支持 `--dry-run`，先看清要发生什么
+5. **永不交互**：需要确认的地方一律要 `--yes`，缺参数直接报错而不是等待输入
+
+```bash
+# agent 把归档导入成一个新工作区
+dsh-inv import ./household-inventory-2026-02-14.zip --name "父母家" --json
+# → { "ok": true, "data": { "workspaceId": "ws_...", "rowCounts": { "items": 187, ... } } }
+
+# 有错误时退出码 3，且一个字节都没写入
+dsh-inv import ./x.zip --dry-run --json
+
+# 用 jq 提取
+dsh-inv alert list --within 30 --json | jq '.data.counts'
+```
+
+### 在只有 Electron、没有 Node 的机器上跑
+
+同一份 CLI 也在应用包里，可以让 Electron 以纯 Node 模式执行：
+
+```powershell
+$env:ELECTRON_RUN_AS_NODE = 1
+& "C:\...\DSH Inventory.exe" resources\app.asar\dist\cli\main.js alert list --json
+```
+
+> **PowerShell 的引号坑**：`--item` 后跟内联 JSON 时，PowerShell 会剥掉双引号
+> （JSON 规范要求双引号）。用文件或管道更省事：`--json-file` / `--stdin`。
+> cmd.exe 与 bash 下 `--item "{\"name\":\"x\"}"` 正常。
+
+---
+
+## 数据布局
+
+```
+%LOCALAPPDATA%\dsh-inventory\           ← 可用 DSH_INVENTORY_HOME 覆盖
+├── registry.json                       工作区注册表（原子写入）
+├── workspaces\
+│   └── ws_01JG8K2M4P7QX9\
+│       ├── data.db                     这个工作区的全部数据
+│       ├── data.db-wal / -shm          WAL 日志
+│       ├── meta.json
+│       ├── attachments\                照片、序列号截图
+│       ├── backups\                    滚动快照
+│       └── import_report.json          来源审计（若由导入创建）
+├── exports\                            默认导出位置
+├── backups\                            删除工作区前的兜底快照
+└── logs\
+```
+
+### SQLite 配置
+
+```
+journal_mode = WAL          并发读 + 崩溃安全
+synchronous  = NORMAL       WAL 下的安全/性能平衡点
+foreign_keys = ON           默认是 OFF，忘了开约束就形同虚设
+busy_timeout = 5000         CLI 与 GUI 同时访问时宁可等待
+temp_store   = MEMORY
+cache_size   = -16000       16 MB
+auto_vacuum  = INCREMENTAL  建库时设定
+user_version = 3            驱动结构迁移
+```
+
+其他硬规则：主键用 **UUIDv7**（时间有序、跨工作区不碰撞）；金额一律存**整数分**；
+`updated_at` 由触发器维护。
+
+> **快照为什么不用 `node:sqlite` 的 `backup()`**
+>
+> 实测在 Windows 上 `backup()` 会**泄漏源库的文件句柄**：`close()` 之后源库仍被占用，
+> `rmSync` 永远报 `EPERM`。而"删除工作区前先留快照"恰恰最需要随后能删掉源库 ——
+> 这个 bug 让删除工作区在 CLI 和桌面端都直接失败过。
+>
+> 现在改为「先 `wal_checkpoint(TRUNCATE)` 把 WAL 并回主库，再做字节拷贝」。
+> 前提是拷贝时无其他写者（同进程串行、且调用前已 close 连接）。
+> 若将来出现多进程并发写入，需要换成别的方案。
+
+> **Windows 上删目录要带退避重试**
+>
+> 关闭 SQLite 连接后文件句柄是**异步**释放的，紧接着的同步 `rmSync` 容易撞上 `EPERM`。
+> `removeDirWithRetry()` 对 `EPERM`/`EBUSY`/`ENOTEMPTY` 做几次退避重试，而不是一次就放弃。
+
+---
+
+## 导出包格式（本项目的公共接口）
+
+```
+household-inventory-2026-02-14.zip
+├── manifest.json      机器可读：结构、类型、约束、枚举、外键（由 fields.ts 派生）
+├── README.md          人可读：同一份 manifest 渲染出的字段说明表
+├── checksums.txt      每个文件的 sha256
+├── tables/
+│   ├── items.csv
+│   └── stock_moves.csv
+├── attachments/       附件（可选）
+└── import_report.json 该工作区当初的来源（可选）
+```
+
+### 单一真相：`src/core/fields.ts`
+
+字段定义只写一次，三处产物全部由它派生，因此**在物理上不可能 drift**：
+
+```
+src/core/fields.ts  ──┬──► SQLite DDL          (schema.ts)
+                      ├──► manifest.json       (manifest.ts)
+                      └──► 界面表单与列        (renderer，经 IPC)
+```
+
+改字段只需改一处，导入导出格式与界面自动跟上。
+
+### CSV 约定
+
+| 项 | 值 | 原因 |
+| --- | --- | --- |
+| 编码 | UTF-8 **带 BOM** | 否则 Excel 打开中文乱码 |
+| 引号 | **非空字段全部加引号** | 防 Excel 把 `2027-03` 当日期、把 `0012345` 的前导零吃掉 |
+| 换行 | CRLF | Excel 友好 |
+| 空值 | **空单元格** | 见下 |
+
+> **空值设计（踩过坑，值得记下）**
+>
+> 最初用 `\N` 作"显式置空"哨兵，结果往返测试失败：CSV 里只有"空单元格"一种表示空的手段，
+> 所以 `NULL` 与空字符串在导出时**本来就会塌缩到一起**，写哨兵并不能让信息守恒，只是让文件变脏。
+>
+> 而且语义上也不需要它：导入永远是新建工作区，每行都被完整物化，不存在"部分更新"，
+> 所以"空单元格 = 空值"是正确解读。现在 `\N` 仅作为**读取时的兼容**保留，**永不写出**。
+
+`expiry_precision = 'month'`（包装只印到月，如 `2027-03`）会折算成**当月最后一天**，
+因为过期判断只认 `expires_on` 一列 —— 宁可晚一天提示，也不提前误报。
+
+### 校验与失败处理
+
+```
+安全解压（防 zip slip，逐个校验路径未逃出目标目录）
+  → 校验 manifest 格式与版本兼容
+  → 校验 checksums.txt
+  → 逐表解析 CSV（类型转换失败报出表名与行号）
+  → 必填 / 枚举 / 日期 / 编码唯一 / 外键引用 全量检查
+  → 有错误：退出码 3，一个字节都不写
+  → 无错误：建新目录 → 单事务写入 → 原子更新 registry → 写 import_report.json
+  → 任何一步失败：删除刚建的目录，注册表未动过
+```
+
+---
+
+## 提醒规则
+
+分级：`已过期` → `紧急`（≤ 阈值/3）→ `临期`（≤ 阈值）→ `关注`（≤ 阈值×2）→ `正常`
+
+阈值按分类，**刻意收得比较紧**：
+
+| 分类 | 提前量 | 理由 |
+| --- | --- | --- |
+| 药品 / 保健品 | 60 天 | 家里翻药箱的周期长，值得早提醒 |
+| 食品 | 15 天 | 提前太多没意义，"还剩几天"更有用 |
+| 日用品 / 化妆品 | 45 天 | 够在下次采购时补上 |
+| 数码 / 医疗器械 | 60 天 | 质保到期前要留出送修时间 |
+| 证件票据 | 45 天 | 续保/换证要预约 |
+
+标记为**关键物品**的条目，窗口 ×1.5。
+
+> 阈值过大会让列表被噪音填满，用户三周内就会无视它 —— 那样整个系统就白做了。
+> 第一版把证件类设成 120 天（关键物品后变 180 天），交强险提前半年就报"紧急"，
+> 实测后收紧到 45 天。
+
+三类到期日**同时参与**提醒：
+
+1. **保质期** —— `expires_on`
+2. **质保期** —— `warranty_until`
+3. **开封后有效期** —— `opened_on + items.open_shelf_life_days`（很多药开封后远短于保质期）
+
+---
+
+## 项目结构
+
+```
+src/
+├── core/                    纯 Node，禁止 import electron（否则 CLI 就死了）
+│   ├── fields.ts            ★ 单一真相：字段定义 + 枚举 + 预警阈值
+│   ├── schema.ts            由 fields.ts 生成 DDL；含「结构不一致就整表重建」的迁移
+│   ├── manifest.ts          由 fields.ts 生成 manifest.json + 校验
+│   ├── db.ts                node:sqlite 访问层、事务、备份、自检、内部标识生成
+│   ├── workspace.ts         工作区增删改查、注册表原子读写、路径逃逸防护
+│   ├── csv.ts               RFC4180 解析/序列化（含空值语义）
+│   ├── import.ts            导入管线：校验 → 建新工作区 → 单事务写入
+│   ├── export.ts            导出管线 → zip（manifest/README/CSV/checksums）
+│   ├── alerts.ts            到期来源汇总、提醒窗口、分类分组
+│   ├── ordering.ts          分组树（三级）、排序字段、手动顺序
+│   ├── bulk.ts              「一组库存」子行、FEFO 领用、父项汇总
+│   ├── dates.ts             日期、月末折算、剩余天数
+│   ├── values.ts            类型校验与归一（写入层与导入层共用同一份）
+│   ├── zip.ts               调用系统 tar.exe（libarchive，UTF-8 名字不乱码）
+│   ├── seed.ts              演示数据（刻意覆盖各种到期情况）
+│   └── ids.ts / util.ts / meta.ts
+├── cli/                     命令行工具
+│   ├── args.ts              零依赖参数解析
+│   └── main.ts              命令表 + 人读表格 / JSON 信封
+├── main/main.ts             Electron 主进程：IPC 白名单，不含领域逻辑
+├── preload/preload.ts       contextBridge，具名方法白名单
+├── renderer/                index.html + app.ts + styles.css（零依赖原版 TS）
+└── test/core.test.ts        58 项：往返不变式、日期、CSV、隔离、批量、分组排序、回归
+scripts/build.mjs            编译 + 搬运静态资源
+```
+
+---
+
+## 测试
+
+三层，都是零测试框架依赖（`node:test` + 两个自写的装置）：
+
+```
+npm.cmd run typecheck   # 主进程/CLI/core + 渲染层，两套 tsconfig
+npm.cmd test            # 58 项单元测试（不变量 + 回归）
+npm.cmd run test:func   # 89 项 CLI/数据层功能测试（真跑命令、核对输出）
+npm.cmd run test:gui    # 19 步桌面端走查（真开 Electron，读 DOM）
+npm.cmd run test:all    # 单元 + 功能
+```
+
+**三层查的是不同的东西，不能互相替代**：
+单元测试查不变量，功能测试查"命令跑出来的东西对不对"（数量、顺序、退出码、措辞），
+桌面端走查查"界面真的画出来了吗"。这一轮就是这样抓到 6 个真 bug 的 ——
+其中 3 个（选项名写错、字段丢了、按钮找不到）单靠单元测试永远发现不了。
+
+### 单元测试
+
+最关键的一项是**往返不变式**：
+
+```
+export(ws) → import → ws'   ⇒  除时间戳外，全部数据深度相等
+```
+
+它同时证明了：导出包是完整备份、格式没有隐性丢失、导入不会串改源工作区。
+
+其余覆盖：日期与月末折算、CSV 引号/换行/中文/前导零与空值语义、金额分的精度、
+manifest 派生一致性、工作区隔离、导入失败不留残目录、重复导入产生两个独立工作区、
+删除工作区先留快照、批量不变量与 FEFO 领用、三级分组与排序、未分类置顶。
+
+`core.test.ts` 末尾还有一节**回归测试**，每个 bug 都写清了"当初是怎么坏的"。
+别删它们 —— 那是唯一能防止同一个坑被踩第二次的东西。
+
+### 功能测试
+
+`scripts/functest.mjs` 在临时目录里真跑 CLI，逐条核对具体内容而不是"不报错"：
+数量对不对、顺序对不对、退出码对不对、措辞对不对。
+
+支持 `FUNCTEST_ONLY=<名字片段>` 只跑某几条（注意：会跳过初始化用例，需要先自己
+准备好数据目录）。
+
+### 桌面端走查
+
+`scripts/guitest.cjs` 真的把 Electron 开起来，一步步读 DOM 并汇报。
+每一步单独一次 `executeJavaScript`，所以失败能精确归因到哪一步 ——
+写成一大块的话，只能得到一个没有上下文的 `Cannot read properties of undefined`。
+
+---
+
+## 已知限制
+
+- **zip 依赖系统 `tar.exe`**（Windows 10 1803+ 自带）。打包后的应用同理。
+  换成自实现 zip 或引 `fflate` 即可解除，但会引入依赖，当前取舍是保持零依赖。
+- `node:sqlite` 在 Node 下会打印 `ExperimentalWarning`（走 stderr，不影响 stdout 的 JSON）。
+  设 `NODE_NO_WARNINGS=1` 可静音。
+- **桌面端表格未做虚拟滚动**，几百行无压力，上万行需要分页。命令行不受影响。
+- 尚无条码扫描与小票 OCR —— 需要时再加，不影响现有格式与命令。
+- 桌面端与命令行共用 `src/core/`，但**没有做并发写的协调**：
+  两边同时改同一个工作区时，SQLite 的 WAL 能保证不损坏，但后写的一方会覆盖先写的字段。
+  单人使用场景下无影响。
+- **打包（`dist:win`）尚未验证过**。功能层面是验过的，产出安装包这条路没走过。

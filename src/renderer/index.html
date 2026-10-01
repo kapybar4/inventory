@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;"
+    />
+    <title>DSH Inventory</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <div class="brand">
+          <span class="mark"></span>
+          <strong>Inventory</strong>
+          <span class="muted small" id="app-meta"></span>
+        </div>
+        <div class="ws-picker" id="ws-picker"></div>
+        <nav id="tabs">
+          <button data-tab="dashboard" class="tab active">概览</button>
+          <button data-tab="groups" class="tab">分组</button>
+          <button data-tab="timeline" class="tab">时间轴</button>
+          <button data-tab="items" class="tab">物品</button>
+          <button data-tab="workspaces" class="tab">工作区</button>
+          <button data-tab="schema" class="tab">字段与格式</button>
+        </nav>
+      </header>
+
+      <!-- 常驻横幅：打开就能看到，这是整个应用存在的主要理由 -->
+      <div id="banner" class="hidden">
+        <div id="banner-text"></div>
+        <div id="banner-chips"></div>
+      </div>
+
+      <main id="view"></main>
+    </div>
+
+    <div id="modal-root" class="hidden"></div>
+    <div id="toast-root"></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
