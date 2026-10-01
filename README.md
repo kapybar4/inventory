@@ -4,8 +4,8 @@
 
 核心不是"把东西记下来"，而是**快过期时主动告诉你** —— 所以 `alert list` 与桌面端顶部横幅是这套东西存在的理由，数据库只是它的存储引擎。
 
-> 应用显示名是 `Inventory`。仓库名、数据目录（`%LOCALAPPDATA%\dsh-inventory`）、
-> 归档格式标识（`dsh-inventory-archive`）里仍然带 `dsh-` 前缀 ——
+> 应用显示名是 `Inventory`。仓库名与归档格式标识（`dsh-inventory-archive`）
+> 里仍然带 `dsh-` 前缀 ——
 > 那些是**机器标识**，改了老归档读不回来、老数据也找不到。
 
 ---
@@ -51,7 +51,7 @@ npm.cmd run cli -- alert list
 
 ### 这个仓库里没有任何真实数据
 
-`DSH_INVENTORY_HOME` 默认指向**用户主目录**下的应用数据目录，不在仓库里。
+`DSH_INVENTORY_HOME` 默认指向**程序目录下的 `data\`**，见「数据布局」。
 仓库自带的演示数据是程序生成的虚构物品（`src/core/seed.ts`），
 `.gitignore` 也把 `_demo/`、`*.db`、`*.zip` 全部排除。
 
@@ -697,11 +697,13 @@ $env:ELECTRON_RUN_AS_NODE = 1
 
 ## 数据布局
 
+数据放在**程序运行目录下的 `data/`**，一个工作区一个子目录：
+
 ```
-%LOCALAPPDATA%\dsh-inventory\           ← 可用 DSH_INVENTORY_HOME 覆盖
+<程序目录>\data\                          ← 可用 DSH_INVENTORY_HOME 覆盖
 ├── registry.json                       工作区注册表（原子写入）
 ├── workspaces\
-│   └── ws_01JG8K2M4P7QX9\
+│   └── ws_01JG8K2M4P7QX9\               一个工作区 = 一个子目录
 │       ├── data.db                     这个工作区的全部数据
 │       ├── data.db-wal / -shm          WAL 日志
 │       ├── meta.json
@@ -711,6 +713,21 @@ $env:ELECTRON_RUN_AS_NODE = 1
 ├── exports\                            默认导出位置
 ├── backups\                            删除工作区前的兜底快照
 └── logs\
+```
+
+**拷贝整个 `data/` 目录就等于搬走了全部数据** —— 没有注册表、环境变量、
+绝对路径之类的隐形依赖。这也是把数据放在程序目录而不是
+`%LOCALAPPDATA%` 的原因。
+
+`<程序目录>` 是往上找 `package.json` 得到的（开发时就是仓库根目录）；
+打包后是 exe 所在目录。**不用当前工作目录** —— 双击图标启动时 cwd 可能是
+`C:\Windows\System32`，跟着它走数据会散到系统目录里。
+
+代价：程序若装在 `Program Files` 这类**受保护目录**里会写不进去。
+这时用环境变量指到别处：
+
+```powershell
+$env:DSH_INVENTORY_HOME = 'D:\我的家当'
 ```
 
 ### SQLite 配置

@@ -112,17 +112,63 @@ export interface Registry {
 // 路径解析
 // ─────────────────────────────────────────────────────────────
 
+/** 本应用在 package.json 里的 name —— 认出"哪个 package.json 才是我的" */
+const APP_PACKAGE_NAME = 'dsh-inventory';
+
 /**
- * 默认数据根目录。
- * Electron 会传入 app.getPath('userData')；纯 Node（CLI）走环境变量或用户目录。
+ * 程序运行目录。数据就放在它下面的 `data/`。
+ *
+ * 之所以要"往上找 package.json"而不是直接用 `process.cwd()`：
+ * 双击图标启动时 cwd 可能是 `C:\Windows\System32`，跟着它走数据就散到系统目录里了。
+ * 而这个函数也可能被 `dist/cli/main.js`（两层深）调用，所以要循环往上找，
+ * 不能写死层数。
+ *
+ * 找的过程里会先撞上 `node_modules/electron/package.json` —— 那不是我们的，
+ * 靠 `name` 字段排除掉。找不到就退回 cwd，总比抛错强。
+ */
+export function programDir(): string {
+  /*
+   * 打包后代码在 app.asar 里，`dirname(__dirname)` 会得到
+   * `…\resources\app.asar` 这种**不可写**的路径。这时数据要放在 exe 旁边，
+   * 所以用 `process.execPath` 的目录（Electron 主进程与 Electron 版 Node 都适用）。
+   */
+  if (__dirname.includes('.asar')) return dirname(process.execPath);
+
+  let dir = __dirname;
+  for (let i = 0; i < 6; i += 1) {
+    const pkgPath = join(dir, 'package.json');
+    if (existsSync(pkgPath)) {
+      try {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: string };
+        if (pkg.name === APP_PACKAGE_NAME) return dir;
+      } catch {
+        /* package.json 坏了就继续往上找 */
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return process.cwd();
+}
+
+/**
+ * 默认数据根目录：**程序运行目录下的 `data/`**。
+ *
+ * 一个工作区 = `data/workspaces/<id>/` 一个子目录（每个目录一套
+ * `data.db` + `meta.json` + `attachments/`），互不影响，拷贝即迁移。
+ *
+ * 优先级：`DSH_INVENTORY_HOME`（测试与多套数据用）→ `<程序目录>/data`。
+ *
+ * 之前放在 `%LOCALAPPDATA%\dsh-inventory`，是为了避开"程序装在 Program Files
+ * 里写不进去"这种情况。改成程序目录下是**有意的取舍**：数据跟着程序走，
+ * 拷贝目录就能搬走整套数据。代价是程序若装在受保护目录里，
+ * 启动时会失败 —— 这时用 `DSH_INVENTORY_HOME` 指到别处即可。
  */
 export function defaultDataDir(): string {
   const env = process.env['DSH_INVENTORY_HOME'];
   if (env && env.trim()) return resolve(env.trim());
-  const localAppData = process.env['LOCALAPPDATA'];
-  if (localAppData) return join(localAppData, 'dsh-inventory');
-  const home = process.env['USERPROFILE'] ?? process.env['HOME'] ?? process.cwd();
-  return join(home, '.dsh-inventory');
+  return join(programDir(), 'data');
 }
 
 export function registryPath(dataDir: string): string {

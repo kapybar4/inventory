@@ -146,11 +146,20 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   界面和命令行都必须调它，**不要自己拼**。曾经界面写的是
   `join(app.getPath('userData'), 'inventory')`，而 userData 会被
   `--user-data-dir` 改掉 —— 于是同一个应用有了两套数据路径：
-  命令行看 `%LOCALAPPDATA%\dsh-inventory`，界面翻 profile 下的 `inventory\`。
-  表现是"命令行有数据，界面一片空白"，而且**两边都不报错**，只能靠人比对路径。
-  数据落在哪和 Chromium profile 落在哪是两件事，不该互相牵动。
-  界面启动时若发现数据目录里没有 registry.json，会往 stderr 打一条提示，
-  就是为了让这类"沉默的空白"至少留下一句话。
+  命令行看一个地方，界面翻 profile 目录。表现是"命令行有数据，界面一片空白"，
+  而且**两边都不报错**，只能靠人比对路径。数据落在哪和 Chromium profile
+  落在哪是两件事，不该互相牵动。界面启动时若发现数据目录里没有 registry.json，
+  会往 stderr 打一条提示，就是为了让这类"沉默的空白"至少留下一句话。
+- **数据放在 `<程序目录>/data/`，一个工作区一个子目录。**
+  `defaultDataDir()` = `programDir()` + `data`；`DSH_INVENTORY_HOME` 可覆盖（测试用）。
+  布局：`data/registry.json` 是索引，`data/workspaces/<id>/` 里各有一套
+  `data.db` + `meta.json` + `attachments/`，互不影响，**拷贝整个 `data/` 即完成迁移**。
+  `programDir()` 是**往上找 `package.json`**，不是用 `process.cwd()` ——
+  双击图标启动时 cwd 可能是 `C:\Windows\System32`，跟着它走数据会散到系统目录。
+  找的过程会先撞上 `node_modules/electron/package.json`，靠 `name` 字段排除。
+  打包后代码在 `.asar` 里（不可写），改用 `dirname(process.execPath)`，即 exe 旁边。
+  代价：程序若装在 `Program Files` 这类受保护目录里会写不进去，那时用
+  `DSH_INVENTORY_HOME` 指到别处。这是"数据跟着程序走"的**有意取舍**。
 - **应用显示名（`APP_NAME`）与机器标识是两回事**。显示名可以改（现在叫 `Inventory`），
   但 `APP_FORMAT` / `REGISTRY_FORMAT` / 数据目录名里那些 `dsh-inventory-*`
   **一个字符都不能动**：改了老归档读不回来、老数据目录也找不到。
