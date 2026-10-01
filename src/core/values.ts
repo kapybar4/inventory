@@ -116,6 +116,15 @@ export function validateFieldValue(
   fieldName: string,
   enumName?: string,
   enums?: Record<string, { key: string }[]>,
+  /**
+   * 字段定义里的 `validation`。**数值范围靠它，不靠调用方自觉。**
+   *
+   * 早先这里只查枚举，`validation.min/max` 完全没生效 ——
+   * 后果是 `unit_price_cents` 上明明写着 `min: 0`，负价格照样进库，
+   * 而且因为它是合法整数，一路都报成功。
+   * 字段定义里写了约束却没人执行，比没写更糟：看代码的人会以为已经挡住了。
+   */
+  validation?: { min?: number; max?: number },
 ): void {
   if (value === null || value === undefined || value === '') return;
 
@@ -130,6 +139,19 @@ export function validateFieldValue(
 
   // 其余按 kind 的类型规则走，复用同一份规范化逻辑
   normalizeValue(value, kind, fieldName);
+
+  // 数值范围：normalizeValue 已保证它是合法数字，这里只管边界
+  if (kind === 'int' || kind === 'money_cents') {
+    const n = Number(value);
+    if (Number.isFinite(n)) {
+      if (validation?.min !== undefined && n < validation.min) {
+        throw new FieldError(`${fieldName}: ${n} 小于下限 ${validation.min}`);
+      }
+      if (validation?.max !== undefined && n > validation.max) {
+        throw new FieldError(`${fieldName}: ${n} 超过上限 ${validation.max}`);
+      }
+    }
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

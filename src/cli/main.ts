@@ -19,7 +19,7 @@ import { resolve } from 'node:path';
 
 import { APP_NAME, APP_VERSION, APP_FORMAT, APP_FORMAT_VERSION } from '../core/meta';
 import { SCHEMA_VERSION } from '../core/schema';
-import { ENUMS, CATEGORY_LEAD_DAYS } from '../core/fields';
+import { ENUMS, CATEGORY_LEAD_DAYS, TABLES } from '../core/fields';
 import { exportWorkspace, exportWorkspaces } from '../core/export';
 import {
   importArchive,
@@ -299,39 +299,35 @@ function dataDirOf(args: ParsedArgs): string {
 
 type Db = ReturnType<typeof openDatabase>;
 
-const ITEM_NATURAL_FIELDS = [
-  'uuid',
-  'code',
-  'name',
-  'category',
-  'subcategory',
-  'brand',
-  'spec',
-  'unit',
-  'barcode',
-  'room',
-  'container',
-  'quantity',
-  'remaining',
-  'min_stock',
-  'purchased_on',
-  'unit_price_cents',
-  'amount_cents',
-  'store',
-  'expires_on',
-  'expires_ym',
-  'expiry_precision',
-  'opened_on',
-  'warranty_months',
-  'warranty_until',
-  'status',
-  'is_prescription',
-  'open_shelf_life_days',
-  'serial_no',
-  'photo_path',
-  'notes',
-  'tags',
-] as const;
+/**
+ * JSON 批量录入接受的字段名 —— **从 `fields.ts` 派生，不手写**。
+ *
+ * 早先这是一份手抄的清单，于是必然漂移：`model` 和 `is_bulk` 先后漏在里面，
+ * 后果是**静默丢字段** —— `--json-file` 传 `{"model":"X1"}` 或 `{"bulk":true}`，
+ * 命令照样报"已新增"，回头才发现型号没写进去、批量也没开。
+ * 逐个往里补是治标：下一次给 items 加字段还会漏。
+ * 所以改成从表定义算出来，加字段自动生效，漏不掉。
+ *
+ * 排除的只有三类：
+ *   - `parent_uuid`：结构字段，「一组库存」的子行由 `item stock` 专门管
+ *   - `code`：内部标识，缺省自动生成（要指定时用 `--code`，那是另一条路径）
+ *   - `uuid` 不排除 —— 往返导入要靠它保住父子引用
+ */
+const ITEM_JSON_FIELDS: ReadonlySet<string> = (() => {
+  const def = TABLES.find((t) => t.name === 'items');
+  const names = new Set<string>();
+  for (const f of def?.fields ?? []) {
+    if (f.name === 'parent_uuid' || f.name === 'code') continue;
+    names.add(f.name);
+    names.add(camelizeKey(f.name));
+  }
+  return names;
+})();
+
+/** `unit_price_cents` → `unitPriceCents`，让两种写法都认 */
+function camelizeKey(snake: string): string {
+  return snake.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+}
 
 /**
  * 内部标识：委托给 core 的 nextItemCode。
@@ -339,6 +335,55 @@ const ITEM_NATURAL_FIELDS = [
  */
 function nextCode(db: Db, category: string): string {
   return nextItemCode(db, category);
+}
+
+/** 编码前缀：`MED-0007` → `MED` */
+function codePrefix(code: string): string {
+  const i = code.lastIndexOf('-');
+  return i > 0 ? code.slice(0, i) : code;
+}
+
+/** 编码序号：`MED-0007` → 7；对不上格式给 0 */
+function codeNumber(code: string): number {
+  const m = /-(\d+)$/.exec(code);
+  return m ? Number(m[1]) : 0;
+}
+
+/**
+ * 一批物品的编码分配器。
+ *
+ * 为什么不能直接循环调 `nextItemCode`：它返回的是**当前库里**第一个没被占用的
+ * 序号，而同一批的多条在算编码时都还没落库 —— 于是同批里几个未分类的物品
+ * 会全部拿到 `GEN-0002`，然后第二条起报"物品编码已存在"，整批失败。
+ *
+ * 这里按前缀记住"已经发到几号"，保证批内不重复，同时也不跟库里已有的撞。
+ */
+function makeCodeAllocator(db: Db): (category: string) => string {
+  const allocated = new Map<string, number>();
+
+  return (category: string): string => {
+    // 先按老规矩从库里取一个基准，再往后推到本批没用过的号
+    let candidate = nextCode(db, category);
+    const prefix = codePrefix(candidate);
+    let n = codeNumber(candidate);
+
+    const seen = new Set<number>();
+    for (const [code] of allocated) {
+      if (codePrefix(code) === prefix) seen.add(codeNumber(code));
+    }
+    while (seen.has(n)) {
+      n += 1;
+      candidate = `${prefix}-${String(n).padStart(4, '0')}`;
+    }
+    // 同时也要避开库里已有的（nextItemCode 只保证起点没被占，往后推仍可能撞）
+    while (selectOne(db, 'items', 'code = ?', [candidate])) {
+      n += 1;
+      candidate = `${prefix}-${String(n).padStart(4, '0')}`;
+    }
+
+    allocated.set(candidate, n);
+    return candidate;
+  };
 }
 
 /**
@@ -614,7 +659,7 @@ function normalizeJsonKeys(input: Record<string, unknown>): Record<string, strin
   const v: Record<string, string | null> = {};
   for (const [k, raw] of Object.entries(input)) {
     const key = JSON_KEY_ALIAS[k] ?? k;
-    if (!ITEM_NATURAL_FIELDS.includes(key as (typeof ITEM_NATURAL_FIELDS)[number])) continue;
+    if (!ITEM_JSON_FIELDS.has(key)) continue;
     if (raw === null || raw === undefined) continue;
     if (typeof raw === 'boolean') v[key] = raw ? 'true' : 'false';
     else v[key] = String(raw);
@@ -1248,7 +1293,16 @@ function cmdItemAdd(args: ParsedArgs, dataDir: string): number {
   for (const j of jsonInputs) {
     if (!j['name']) throw new ArgError('JSON 输入必须包含 name 字段');
     const base: Record<string, string | null> = {
-      category: 'other',
+      /**
+       * 这里**不能**给 category 兜底成 'other'。
+       *
+       * `{ ...base, ...j }` 是"j 里有就覆盖"，所以 j 里**没有** category 时
+       * 'other' 会留下 —— "没写分类"就此被静默当成"用户选了其他"，
+       * 「未分类」组永远是空的，那条置顶提示也永远不出现。
+       *
+       * 缺省值只该给"缺了也无所谓"的字段（数量 1、非处方、无到期精度）。
+       * 分类缺了是**有含义的**：它是未分类，后面会显式写成空串。
+       */
       quantity: '1',
       remaining: '1',
       is_prescription: 'false',
@@ -1276,10 +1330,35 @@ function cmdItemAdd(args: ParsedArgs, dataDir: string): number {
   const db = openDatabase(workspaceDbPath(dataDir, entry));
   const created: Record<string, unknown>[] = [];
   try {
+    /**
+     * 两趟走：**先全部校验并算好值，再一个事务写进去**。
+     *
+     * 早先是一趟循环、每条自己开一个事务，于是"第二条分类写错"时第一条
+     * 已经落库了 —— 命令报 exit 2，库里却多了一条。批量录入要么全成、
+     * 要么全不成；留半截比直接失败更难收拾（得自己去比对哪几条进去了）。
+     *
+     * 顺带解决编码冲突：`nextCode` 读的是库里当前的最大号，
+     * 同批多条都还没落库时会算出同一个号。用 `alloc` 在批内记账。
+     */
+    const alloc = makeCodeAllocator(db);
+    const pending: { values: Record<string, string | null>; code: string; category: string }[] = [];
+
     for (const d of drafts) {
-      const category = d['category'] ?? 'other';
+      /**
+       * 分类不给就是**未分类**（空串），不是 `other`。
+       *
+       * 早先这里写的是 `?? 'other'`，于是 `--json-file` 传一批只写了名字的物品，
+       * 它们全被塞进「其他」—— "还没想好放哪类"就这么被静默地伪装成了"已分类"，
+       * 而「未分类」组的提示也因此永远不出现。
+       *
+       * `other` 是**用户主动选的**分类（"其他"），跟"没选"是两回事。
+       * 空值语义在 fields.ts 里有明确说明，这里不该兜底。
+       */
+      const category = d['category'] ?? '';
       const allowed = (ENUMS['item_category'] ?? []).map((e) => e.key);
-      if (!allowed.includes(category)) {
+      // 空串是**合法**值（= 未分类），不在枚举清单里但必须放行。
+      // 枚举描述的是"有哪些分类"，而"尚未分类"不是一个分类。
+      if (category !== '' && !allowed.includes(category)) {
         throw new ArgError(`分类 "${category}" 不存在。可用: ${allowed.join(', ')}`);
       }
       const status = d['status'] ?? 'in_stock';
@@ -1287,29 +1366,45 @@ function cmdItemAdd(args: ParsedArgs, dataDir: string): number {
       if (!statusAllowed.includes(status)) {
         throw new ArgError(`状态 "${status}" 不存在。可用: ${statusAllowed.join(', ')}`);
       }
-      const code = d['code'] || nextCode(db, category);
-      if (selectOne(db, 'items', 'code = ?', [code])) throw new ArgError(`物品编码已存在: ${code}`);
-
-      const values: Record<string, string | null> = { ...d, code, status };
-      if (!values['purchased_on']) values['purchased_on'] = today();
-
-      if (bool(args, 'dryRun')) {
-        created.push({ code, name: values['name'], category, dryRun: true });
-        continue;
+      const code = d['code'] || alloc(category);
+      // 既要跟库里已有的比，也要跟同批已排队的比
+      if (selectOne(db, 'items', 'code = ?', [code]) || pending.some((p) => p.code === code)) {
+        throw new ArgError(`物品编码已存在: ${code}`);
       }
 
-      let item: Record<string, unknown> | null = null;
+      const values: Record<string, string | null> = { ...d, code, status };
+      /**
+       * 分类**必须显式写进去**，哪怕它是空的。
+       *
+       * 不给这个键的话，`category` 会落到建表时的默认值 `'other'` ——
+       * 于是"什么都没填"变成了"用户选了其他"，「未分类」组永远空着。
+       * 空值在这里是有意义的信息，不能靠"键不存在"来表达。
+       */
+      values['category'] = category;
+      if (!values['purchased_on']) values['purchased_on'] = today();
+
+      // 只排队，先不写 —— 全部校验通过之后才在**一个**事务里落库
+      pending.push({ values, code, category });
+    }
+
+    if (bool(args, 'dryRun')) {
+      for (const p of pending) {
+        created.push({ code: p.code, name: p.values['name'], category: p.category, dryRun: true });
+      }
+    } else {
       transaction(db, () => {
-        item = insertRow(db, 'items', values) as unknown as Record<string, unknown>;
-        insertRow(db, 'stock_moves', {
-          item_uuid: String(item['uuid']),
-          moved_on: values['purchased_on']!,
-          qty_delta: values['quantity'] ?? '1',
-          reason: 'purchase',
-          notes: values['store'] ? `购自 ${values['store']}` : null,
-        });
+        for (const p of pending) {
+          const item = insertRow(db, 'items', p.values) as unknown as Record<string, unknown>;
+          insertRow(db, 'stock_moves', {
+            item_uuid: String(item['uuid']),
+            moved_on: p.values['purchased_on']!,
+            qty_delta: p.values['quantity'] ?? '1',
+            reason: 'purchase',
+            notes: p.values['store'] ? `购自 ${p.values['store']}` : null,
+          });
+          created.push(item);
+        }
       });
-      created.push(item as unknown as Record<string, unknown>);
     }
   } finally {
     db.close();

@@ -128,7 +128,7 @@ check('init 创建数据目录与默认工作区，并写入演示数据', () =>
 });
 
 check('重复 init 不报错、不改动已有数据', () => {
-  const before = json(['item', 'list', '--all']).data.data.items.length;
+  const before = json(['item', 'list', '--all', '--ws', '我的家']).data.data.items.length;
   const r = json(['init', '--name', '换个名字']);
   eq(r.code, 0, '退出码');
   eq(r.data.data.alreadyInitialized, true, '应识别为已初始化');
@@ -1584,6 +1584,109 @@ check('导入未完成（importing）的工作区也被拦住', () => {
   // 收尾：恢复正常
   json(['ws', 'unquarantine', '我的家']);
   eq(json(['ws', 'list']).data.data.abnormal, 0, '恢复正常');
+  return 'exit 3';
+});
+
+// ═════════════════════════════════════════════════════════════
+// 15. JSON 批量录入：字段不能被静默丢掉
+// ═════════════════════════════════════════════════════════════
+
+section('15. JSON 批量录入');
+
+check('JSON 里的 model 与 bulk 不会被丢掉', () => {
+  // 当初是怎么坏的：JSON 键要过一份**手写的**白名单（ITEM_NATURAL_FIELDS），
+  // 而 model 和 is_bulk 先后漏在里面。漏了不报错，命令照样回"已新增"，
+  // 只是字段悄悄没了 —— 批量导入几十条之后才发现型号全空。
+  // 现在白名单从 fields.ts 派生，加字段自动生效。
+  const f = join(ROOT, 'json-model.json');
+  writeFileSync(
+    f,
+    JSON.stringify([
+      { name: 'JSON型号探针', category: 'digital', brand: '探针牌', model: 'PROBE-X9', spec: '规格也带上' },
+      { name: 'JSON批量探针', category: 'daily', bulk: true, qty: 10, remaining: 4, minStock: 5 },
+    ]),
+    'utf8',
+  );
+  cli(['item', 'add', '--json-file', f, '--ws', '我的家']);
+
+  // 必须点名工作区：跑到这里时 active 可能已经是别的了
+  const items = json(['item', 'list', '--all', '--ws', '我的家']).data.data.items;
+  const one = items.find((i) => i.name === 'JSON型号探针');
+  ok(one, '第一条应存在');
+  eq(one.model, 'PROBE-X9', 'model 必须带进去');
+  eq(one.brand, '探针牌', 'brand 也在');
+  eq(one.spec, '规格也带上', 'spec 也在');
+
+  const two = items.find((i) => i.name === 'JSON批量探针');
+  ok(two, '第二条应存在');
+  eq(two.isBulk, true, 'bulk:true 必须真的开启批量');
+  eq(two.quantity, 10, '数量');
+  eq(two.remaining, 4, '剩余');
+  eq(two.minStock, 5, '最低库存');
+  eq(two.lowStock, true, '4 < 5，应当是待补货');
+  return 'model + bulk';
+});
+
+check('JSON 里不写 category = 未分类，不是「其他」', () => {
+  // 当初是怎么坏的：`{ ...base, ...j }` 里 base 写死了 category:'other'，
+  // 而"j 里有才覆盖"，所以不写分类的条目会落到 'other' ——
+  // "还没想好放哪类"被静默伪装成"已分类"，「未分类」组永远空着。
+  const f = join(ROOT, 'json-uncat.json');
+  writeFileSync(
+    f,
+    JSON.stringify([
+      { name: '不给分类探针' },
+      { name: '给空串探针', category: '' },
+      { name: '主动选其他探针', category: 'other' },
+    ]),
+    'utf8',
+  );
+  cli(['item', 'add', '--json-file', f, '--ws', '我的家']);
+
+  const items = json(['item', 'list', '--all', '--ws', '我的家']).data.data.items;
+  const pick = (n) => items.find((i) => i.name === n);
+  eq(pick('不给分类探针').category, '', '不写分类 → 未分类');
+  eq(pick('给空串探针').category, '', '空串 → 未分类');
+  eq(pick('主动选其他探针').category, 'other', '主动选的 other 要保留');
+
+  // 未分类的件数要与分组页那个置顶组对得上
+  const tree = json(['group', 'list', '--levels', '1', '--ws', '我的家']).data.data;
+  const pinned = tree.groups.find((g) => g.pinned);
+  ok(pinned, '应有置顶的未分类组');
+  const uncat = items.filter((i) => (i.category ?? '') === '').length;
+  eq(pinned.count, uncat, `置顶组的 count(${pinned.count}) 应等于未分类件数(${uncat})`);
+  return `${uncat} 条未分类`;
+});
+
+check('非法分类整批拒绝，不留半截数据', () => {
+  const f = join(ROOT, 'json-badcat.json');
+  writeFileSync(
+    f,
+    JSON.stringify([{ name: '合法的一条', category: 'daily' }, { name: '非法的一条', category: 'nope' }]),
+    'utf8',
+  );
+  const before = json(['item', 'list', '--all', '--ws', '我的家']).data.data.items.length;
+  const r = cli(['item', 'add', '--json-file', f, '--ws', '我的家']);
+  eq(r.code, 2, '参数/取值错误 → 退出码 2');
+  const after = json(['item', 'list', '--all', '--ws', '我的家']).data.data.items.length;
+  eq(after, before, `不该留下半截数据（${before} → ${after}）`);
+  return 'exit 2，无残留';
+});
+
+check('负数价格被拒（字段定义里的 min 真的执行）', () => {
+  // 当初是怎么坏的：validateFieldValue 只查枚举，validation 参数根本没往下传，
+  // 于是 unit_price_cents 上写着 min:0 也拦不住 -5，而且负数是合法整数，
+  // 一路都报成功。约束写在定义里但没人执行，比没写更坑。
+  const bad = cli(['item', 'add', '--name', '负价探针', '-c', 'other', '--unitPrice=-5']);
+  eq(bad.code, 3, '校验失败 → 退出码 3');
+  ok(/小于下限/.test(bad.err), `报错要说清是越界：${bad.err.trim().slice(0, 80)}`);
+
+  // 0 元是合法的（赠品）
+  eq(cli(['item', 'add', '--name', '零元探针', '-c', 'other', '--unitPrice=0']).code, 0, '0 元能进');
+  const items = json(['item', 'list', '--all', '--ws', '我的家']).data.data.items;
+  const zero = items.find((i) => i.name === '零元探针');
+  eq(zero.unitPriceYuan, '0.00', '0 元存下来还是 0');
+  ok(!items.some((i) => i.name === '负价探针'), '负价的没进去');
   return 'exit 3';
 });
 

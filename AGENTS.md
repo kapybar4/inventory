@@ -145,6 +145,28 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 - **应用显示名（`APP_NAME`）与机器标识是两回事**。显示名可以改（现在叫 `Inventory`），
   但 `APP_FORMAT` / `REGISTRY_FORMAT` / 数据目录名里那些 `dsh-inventory-*`
   **一个字符都不能动**：改了老归档读不回来、老数据目录也找不到。
+- **字段定义里的 `validation` 必须在写入层真的执行。** `validateRow` 要把
+  `f.validation` 传给 `validateFieldValue`，后者对 `int` / `money_cents`
+  检查 `min`/`max`。当初是怎么坏的：这个参数根本没往下传，于是
+  `unit_price_cents` 上写着 `min: 0` 也拦不住负价格 —— 而且负数是合法整数，
+  `normalizeValue` 也不报错，命令一路回"已成功"。
+  **约束写在定义里却没人执行，比没写更糟**：看代码的人会以为已经挡住了。
+- **JSON 批量录入的字段白名单要从 `fields.ts` 派生，不要手抄。**
+  当初 `ITEM_NATURAL_FIELDS` 是手写的，`model` 和 `is_bulk` 先后漏在里面，
+  后果是**静默丢字段**：`--json-file` 传 `{"model":"X1"}` 或 `{"bulk":true}`，
+  命令照样报"已新增"，回头才发现型号没写进去、批量也没开。
+  现在用 `ITEM_JSON_FIELDS`（从 `TABLES` 算出来），加字段自动生效。
+- **`item add` 的批量路径要么全成、要么全不成。** 先全部校验并算好编码，
+  再在**一个**事务里落库。当初是每条自己开一个事务，于是"第二条分类写错"时
+  第一条已经进库了 —— 报 exit 2，库里却多一条，还得自己去比对哪几条进去了。
+- **同批新增的编码要批内记账。** `nextItemCode` 返回的是"当前库里第一个空号"，
+  同一批多条在算编码时都还没落库 → 几个未分类物品全拿到 `GEN-0002`，
+  第二条起报"编码已存在"、整批失败。用 `makeCodeAllocator` 在批内累加。
+- **`category` 不写 ≠ 选了「其他」。** 空串是"未分类"这个**有意义的状态**，
+  `other` 是用户主动选的分类。任何 `?? 'other'` / `|| 'other'` 兜底都会把
+  "还没想好放哪"伪装成"已分类"，「未分类」组和那条置顶提示就永远不出现。
+  JSON 路径里 `base` 对象的硬编码默认值、以及"键不存在时落到建表默认值"，
+  两处都踩过这个坑，都已修。
 - **展开区的固定三项（位置/规格/备注）是真实列，不是 JSON**。
   位置要参与分组与排序、规格要参与导出与搜索、备注要参与导出 ——
   塞进 `extra_json` 这些功能会**静默失效**（不会报错，只是搜不到、分组里没了）。
@@ -180,8 +202,8 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 95 项单元测试
-npm.cmd run test:func   # 138 项 CLI/数据层功能测试
+npm.cmd test            # 96 项单元测试
+npm.cmd run test:func   # 142 项 CLI/数据层功能测试
 npm.cmd run test:gui    # 34 步桌面端走查（要开 Electron）
 npm.cmd run test:all    # 单元 + 功能
 ```
@@ -284,7 +306,7 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、单元 95 项、CLI 138 项、往返不变式。
+**已验证**：核心功能、单元 96 项、CLI 142 项、往返不变式。
 桌面端走查的 34 步现在跑不完（见下），改界面时改用聚焦探针确认。
 
 **没验证**：

@@ -528,7 +528,8 @@ function validateRow(table: string, values: Record<string, string | null>): void
   for (const f of def.fields) {
     const v = values[f.name];
     if (v === undefined) continue;
-    validateFieldValue(v, f.kind, f.label || f.name, f.enumName, ENUMS);
+    // 把字段定义里的 validation 一并传下去 —— 否则 min/max 写了也没人执行
+    validateFieldValue(v, f.kind, f.label || f.name, f.enumName, ENUMS, f.validation);
     // 有些类型除了校验还要**归一**：JSON 要排好键序再存，
     // 否则同一份内容会因为键顺序不同而在往返比较里"看起来变了"
     if (f.kind === 'json') values[f.name] = normalizeExtra(v);

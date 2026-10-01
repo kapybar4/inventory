@@ -698,6 +698,51 @@ test('回归：updateRow 也要拦非法日期', () => {
   });
 });
 
+/**
+ * 字段定义里写了 `validation.min/max`，写入层就必须真的执行。
+ *
+ * 当初是怎么坏的：`validateFieldValue` 只查枚举，`validation` 整个参数
+ * 根本没往下传。于是 `unit_price_cents` 上写着 `min: 0`，负价格照样进库 ——
+ * 而且因为负数是合法整数，`normalizeValue` 也不报错，命令一路回"已新增"。
+ * 这种"约束写在定义里但没人执行"的情况最坑：看代码的人会以为已经挡住了。
+ */
+test('回归：金额的 min 真的会被执行（负价格进不去）', () => {
+  withWorkspace('w', 'ws_money_min', (dataDir, entry) => {
+    const db = openDatabase(workspaceDbPath(dataDir, entry));
+    try {
+      // 负数：必须拒
+      assert.throws(
+        () => insertRow(db, 'items', { code: 'M-1', name: '负价格', unit_price_cents: '-500' }),
+        /小于下限/,
+        '负数单价应当被拒',
+      );
+      assert.throws(
+        () => insertRow(db, 'items', { code: 'M-2', name: '负总价', amount_cents: '-1' }),
+        /小于下限/,
+        '负数总价应当被拒',
+      );
+
+      // 边界：0 是允许的（赠品），合法正数也要能进
+      const zero = insertRow(db, 'items', { code: 'M-3', name: '零元', unit_price_cents: '0' });
+      assert.equal(zero['unit_price_cents'], '0', '0 是合法值');
+
+      const ok = insertRow(db, 'items', { code: 'M-4', name: '正常', unit_price_cents: '1234' });
+      assert.equal(ok['unit_price_cents'], '1234');
+
+      // updateRow 走同一条校验，也要拦住
+      assert.throws(
+        () => updateRow(db, 'items', String(ok['uuid']), { unit_price_cents: '-1' }),
+        /小于下限/,
+        '更新也要拦',
+      );
+      const after = selectOne(db, 'items', 'uuid = ?', [String(ok['uuid'])], { includeInternal: true })!;
+      assert.equal(after['unit_price_cents'], '1234', '校验失败不该改坏原值');
+    } finally {
+      db.close();
+    }
+  });
+});
+
 test('回归：内部标识只认「PREFIX-数字」，不被库存子行带偏', () => {
   withWorkspace('w', 'ws_code', (dataDir, entry) => {
     const db = openDatabase(workspaceDbPath(dataDir, entry));

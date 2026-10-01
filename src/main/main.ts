@@ -81,6 +81,39 @@ import { formatDaysLeft, daysUntil, today } from '../core/dates';
 import { centsToYuan, yuanToCents, parseExtra, serializeExtra } from '../core/values';
 import { formatBytes } from '../core/util';
 
+/**
+ * 把 Chromium 的 profile 目录从**漫游** AppData 挪到**本地** AppData。
+ *
+ * Electron 默认用 `%APPDATA%`（Roaming）放 profile —— 但 profile 是缓存、
+ * GPU 着色器、单实例锁这类东西，**本来就不该跟着漫游走**：漫游目录在企业域里
+ * 会被同步、被组策略限制。本地 AppData 才是它该在的地方，
+ * 而且 `%LOCALAPPDATA%` 已经是本项目放数据的地方（见 workspace.ts 的 defaultDataDir），
+ * 两者放一起，"这个应用的东西在哪"只有一个答案。
+ *
+ * **必须在 app ready 之前调用**：userData 决定 Chromium 初始化时去哪读写。
+ *
+ * 命令行显式传了 `--user-data-dir` 就**不要覆盖** —— 那个参数的用途正是
+ * 指定 profile 位置（自动化测试、隔离运行都靠它）。
+ * 早先这里无条件覆盖，结果传进来的 `--user-data-dir` 被静默忽略，
+ * 排查时看到报错路径还是默认目录，白绕了一圈。
+ */
+function useLocalUserData(): void {
+  const explicit = process.argv.some(
+    (a) => a === '--user-data-dir' || a.startsWith('--user-data-dir='),
+  );
+  if (explicit) return;
+
+  try {
+    const local = process.env['LOCALAPPDATA'];
+    if (!local || !local.trim()) return;
+    app.setPath('userData', join(local.trim(), 'dsh-inventory'));
+  } catch {
+    /* 设不了就用默认值，不该因为这个起不来 */
+  }
+}
+
+useLocalUserData();
+
 /** 数据根目录：测试可用 DSH_INVENTORY_HOME 覆盖 */
 function dataDir(): string {
   const env = process.env['DSH_INVENTORY_HOME'];
