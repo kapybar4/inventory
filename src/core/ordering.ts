@@ -56,7 +56,7 @@ export const SORT_FIELDS: SortFieldDef[] = [
   { key: 'manual', label: '手动顺序', desc: false, hint: '按你拖动固定下来的顺序' },
   { key: 'expiry', label: '到期时间', desc: false, hint: '最先到期的排最前，长期在最后' },
   { key: 'name', label: '名称', desc: false, hint: '按拼音/笔画排' },
-  { key: 'purchased', label: '购买日期', desc: true, hint: '最近买的排最前' },
+  { key: 'purchased', label: '入库日期', desc: true, hint: '最近入库的排最前' },
   { key: 'quantity', label: '数量', desc: true, hint: '数量多的排最前' },
   { key: 'remaining', label: '剩余', desc: true, hint: '剩得多的排最前' },
   { key: 'location', label: '位置', desc: false, hint: '按房间 + 柜格排' },
@@ -91,7 +91,7 @@ export function sortItems(items: Row[], field: SortField): Row[] {
       case 'remaining':
         return Number(r['remaining'] ?? 0);
       case 'location':
-        return [r['room'], r['container']].filter(Boolean).join(' / ');
+        return String(r['container'] ?? '');
       case 'price':
         return Number(r['unit_price_cents'] ?? 0);
       case 'created':

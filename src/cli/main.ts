@@ -427,7 +427,6 @@ const ITEM_FIELDS: [string, string][] = [
   ['spec', 'spec'],
   ['unit', 'unit'],
   ['barcode', 'barcode'],
-  ['room', 'room'],
   ['container', 'container'],
   ['store', 'store'],
   ['notes', 'notes'],
@@ -486,7 +485,6 @@ function itemOptionSpecs(): OptionSpec[] {
     { name: 'spec', type: 'string', desc: '规格', valueName: '规格' },
     { name: 'unit', type: 'string', desc: '单位', valueName: '单位' },
     { name: 'barcode', type: 'string', desc: '条码', valueName: 'code' },
-    { name: 'room', type: 'string', desc: '房间', valueName: '房间' },
     { name: 'container', type: 'string', desc: '容器/柜格', valueName: '位置' },
     { name: 'subcategory', type: 'string', desc: '子类', valueName: '文本' },
     { name: 'tags', type: 'string', desc: '标签（逗号分隔）', valueName: '文本' },
@@ -496,8 +494,8 @@ function itemOptionSpecs(): OptionSpec[] {
     { name: 'minStock', type: 'number', desc: '最低库存', valueName: 'N' },
     { name: 'unitPrice', type: 'string', desc: '单价（元）', valueName: '元' },
     { name: 'amount', type: 'string', desc: '总价（元，缺省 = 单价 × 数量）', valueName: '元' },
-    { name: 'store', type: 'string', desc: '购买渠道', valueName: '名称' },
-    { name: 'purchasedOn', type: 'string', desc: '购买日期（缺省今天）', valueName: '日期' },
+    { name: 'store', type: 'string', desc: '来源渠道', valueName: '名称' },
+    { name: 'purchasedOn', type: 'string', desc: '入库日期（缺省今天）', valueName: '日期' },
     { name: 'expiresOn', type: 'string', desc: '到期日 YYYY-MM-DD；不填即「长期」', valueName: '日期' },
     { name: 'expiresYm', type: 'string', desc: '只到月份时填 YYYY-MM（自动折算到当月最后一天）', valueName: '年月' },
     { name: 'longTerm', type: 'boolean', desc: '标记为长期：清空到期日，不参与到期提示' },
@@ -698,7 +696,7 @@ function itemFacts(it: Record<string, unknown>): [string, string][] {
     ['型号', num2(it['model'])],
     ['规格', num2(it['spec'])],
     ['单位', num2(it['unit'])],
-    ['位置', [it['room'], it['container']].filter(Boolean).join(' / ') || '—'],
+    ['位置', String(it['container'] ?? '') || '—'],
     [
       '数量 / 剩余',
       bulk ? `${num2(it['quantity'])} / ${num2(it['remaining'])}` : `${num2(it['remaining'])}　(一件)`,
@@ -706,8 +704,8 @@ function itemFacts(it: Record<string, unknown>): [string, string][] {
     ['批量物品', bulk ? '是' : '否'],
     ['最低库存', bulk ? num2(it['min_stock']) : '—（仅批量物品）'],
     ['状态', ENUMS['item_status']?.find((e) => e.key === it['status'])?.label ?? num2(it['status'])],
-    ['购买日期', num2(it['purchased_on'])],
-    ['购买渠道', num2(it['store'])],
+    ['入库日期', num2(it['purchased_on'])],
+    ['来源渠道', num2(it['store'])],
     ['单价 / 总价', `${yuan(it['unit_price_cents'])} / ${yuan(it['amount_cents'])}`],
     ['到期', expiresOn ? `${expiresOn}（${formatDaysLeft(daysUntil(expiresOn))}）` : '长期'],
     ['开封日期', num2(it['opened_on'])],
@@ -1033,7 +1031,7 @@ function cmdWsStats(args: ParsedArgs, dataDir: string): number {
 
   const db = openDatabase(workspaceDbPath(dataDir, entry), { readOnly: true });
   let byCategory: { key: string; count: number }[] = [];
-  let byRoom: { room: string; count: number }[] = [];
+  let byLocation: { location: string; count: number }[] = [];
   let statusCounts: { key: string; count: number }[] = [];
   let spend = { totalCents: 0, priced: 0, earliest: null as string | null, latest: null as string | null };
 
@@ -1044,14 +1042,14 @@ function cmdWsStats(args: ParsedArgs, dataDir: string): number {
         .all() as { key: string; n: number }[]
     ).map((r) => ({ key: String(r.key), count: Number(r.n) }));
 
-    byRoom = (
+    byLocation = (
       db
         .prepare(
-          `SELECT COALESCE(NULLIF(room,''),'(未填)') AS room, COUNT(*) AS n
-           FROM items GROUP BY room ORDER BY n DESC`,
+          `SELECT COALESCE(NULLIF(container,''),'(未填)') AS location, COUNT(*) AS n
+           FROM items GROUP BY container ORDER BY n DESC`,
         )
-        .all() as { room: string; n: number }[]
-    ).map((r) => ({ room: String(r.room), count: Number(r.n) }));
+        .all() as { location: string; n: number }[]
+    ).map((r) => ({ location: String(r.location), count: Number(r.n) }));
 
     statusCounts = (
       db
@@ -1080,7 +1078,7 @@ function cmdWsStats(args: ParsedArgs, dataDir: string): number {
     workspace: { id: stats.id, name: stats.name, dbPath: stats.dbPath, dbBytes: stats.dbBytes },
     tableCounts: stats.tableCounts,
     byCategory,
-    byRoom,
+    byLocation,
     byStatus: statusCounts,
     spend: {
       totalYuan: centsToYuan(spend.totalCents),
@@ -1101,7 +1099,7 @@ function cmdWsStats(args: ParsedArgs, dataDir: string): number {
     ['物品记录', String(stats.tableCounts['items'])],
     ['出入库流水', String(stats.tableCounts['stock_moves'])],
     ['有价格的记录总额', `¥${data.spend.totalYuan}（${spend.priced} 条记录）`],
-    ['购买日期范围', spend.earliest ? `${spend.earliest} ~ ${spend.latest ?? '—'}` : '—'],
+    ['入库日期范围', spend.earliest ? `${spend.earliest} ~ ${spend.latest ?? '—'}` : '—'],
   ]);
 
   if (byCategory.length > 0) {
@@ -1124,10 +1122,10 @@ function cmdWsStats(args: ParsedArgs, dataDir: string): number {
     ]);
   }
 
-  if (byRoom.length > 0) {
-    printSection('按房间');
-    printTable(byRoom, [
-      { title: '房间', get: (r) => r.room, max: 20 },
+  if (byLocation.length > 0) {
+    printSection('按位置');
+    printTable(byLocation, [
+      { title: '位置', get: (r) => r.location, max: 28 },
       { title: '记录数', get: (r) => String(r.count), align: 'right' },
     ]);
   }
@@ -1546,11 +1544,6 @@ function cmdItemList(args: ParsedArgs, dataDir: string): number {
       where.push('category = ?');
       params.push(category);
     }
-    const room = str(args, 'room');
-    if (room) {
-      where.push('room = ?');
-      params.push(room);
-    }
     const search = str(args, 'search');
     if (search) {
       where.push('(name LIKE ? OR brand LIKE ? OR model LIKE ? OR barcode = ?)');
@@ -1597,7 +1590,6 @@ function cmdItemList(args: ParsedArgs, dataDir: string): number {
         spec: r['spec'] === null ? '' : String(r['spec'] ?? ''),
         unit: r['unit'] === null ? '' : String(r['unit'] ?? ''),
         barcode: r['barcode'] === null ? '' : String(r['barcode'] ?? ''),
-        room: r['room'] === null ? '' : String(r['room'] ?? ''),
         container: r['container'] === null ? '' : String(r['container'] ?? ''),
         quantity: Number(r['quantity'] ?? 0),
         remaining,
@@ -1680,7 +1672,7 @@ function cmdItemList(args: ParsedArgs, dataDir: string): number {
         { title: '名称', get: (r) => r.name + (r.isPrescription ? ' Rx' : ''), max: 40 },
         { title: '品牌', get: (r) => r.brand, max: 14 },
         { title: '型号', get: (r) => r.model, max: 18 },
-        { title: '位置', get: (r) => [r.room, r.container].filter(Boolean).join('/'), max: 22 },
+        { title: '位置', get: (r) => String(r.container ?? ''), max: 28 },
         {
           title: '数量',
           get: (r) => (r.isBulk ? `${r.remaining}/${r.quantity}` : String(r.remaining)),
@@ -1764,9 +1756,7 @@ function cmdItemList(args: ParsedArgs, dataDir: string): number {
  * 否则进 JSON —— 位置要参与分组、规格要参与搜索，塞进 JSON 就全废了。
  */
 const EXTRA_REAL: Record<string, string> = {
-  location: 'location',
-  // 「位置」在库里是 room + container 两列，命令行里拆开更明确
-  room: 'room',
+  location: 'container',
   container: 'container',
   spec: 'spec',
   notes: 'notes',
@@ -1792,7 +1782,7 @@ function cmdItemExtra(args: ParsedArgs, dataDir: string): number {
       const s = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
       return {
         fields: [
-          ['位置', [s(row['room']), s(row['container'])].filter(Boolean).join(' / ')],
+          ['位置', s(row['container'])],
           ['规格', s(row['spec'])],
           ['备注', s(row['notes'])],
         ],
@@ -1829,9 +1819,6 @@ function cmdItemExtra(args: ParsedArgs, dataDir: string): number {
       const value = fieldValue ?? '';
       const real = EXTRA_REAL[fieldName];
 
-      if (fieldName === 'location') {
-        throw new ArgError('「位置」在库里分两列，请用 `item extra <物品> room <房间>` 与 `... container <柜格>`');
-      }
 
       if (real) {
         updateRow(db, 'items', uuid, { [real]: value });
@@ -2392,7 +2379,7 @@ function cmdItemPurge(args: ParsedArgs, dataDir: string): number {
       code: String(r['code'] ?? ''),
       name: String(r['name'] ?? ''),
       category: String(r['category'] ?? ''),
-      location: [r['room'], r['container']].filter(Boolean).join(' / '),
+      location: r['container'],
       expiresOn: r['expires_on'] ? String(r['expires_on']) : null,
     }));
 
@@ -2403,7 +2390,7 @@ function cmdItemPurge(args: ParsedArgs, dataDir: string): number {
         printTable(list, [
           { title: '编码', get: (r) => r.code, max: 14 },
           { title: '名称', get: (r) => r.name, max: 40 },
-          { title: '位置', get: (r) => r.location, max: 24 },
+          { title: '位置', get: (r) => String(r.location ?? ''), max: 28 },
         ]);
         write('\n（去掉 --dry-run 即执行。批量物品不会被清理。）');
       }
@@ -2481,7 +2468,7 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
             itemUuid: String(e.item['uuid'] ?? ''),
             itemName: String(e.item['name'] ?? ''),
             category: String(e.item['category'] ?? ''),
-            location: [e.item['room'], e.item['container']].filter(Boolean).join(' / '),
+            location: e.item['container'],
             remaining: Number(e.item['remaining'] ?? 0),
             isBulk: e.item['is_bulk'] === 'true',
           })),
@@ -2491,7 +2478,7 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
               itemUuid: String(l.item['uuid'] ?? ''),
               itemName: String(l.item['name'] ?? ''),
               category: String(l.item['category'] ?? ''),
-              location: [l.item['room'], l.item['container']].filter(Boolean).join(' / '),
+              location: l.item['container'],
               remaining: Number(l.item['remaining'] ?? 0),
             })),
       }))
@@ -2570,7 +2557,7 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
           { title: '剩余时间', get: (e) => e.daysLeftText, max: 14 },
           { title: '状态', get: (e) => (e.expired ? (e.alertKind === 'warranty' ? '已过保' : '已过期') : ''), max: 8 },
           { title: '数量', get: (e) => (e.isBulk ? String(e.remaining) : '1'), align: 'right', max: 6 },
-          { title: '位置', get: (e) => e.location, max: 24 },
+          { title: '位置', get: (e) => String(e.location ?? ''), max: 24 },
           { title: '物品UUID', get: (e) => e.itemUuid, max: 36 },
         ],
         { indent: 2 },
@@ -2768,7 +2755,6 @@ function cmdGroupList(args: ParsedArgs, dataDir: string): number {
         brand: r['brand'] ?? null,
         model: r['model'] ?? null,
         tags: r['tags'] ?? null,
-        room: r['room'] ?? null,
         container: r['container'] ?? null,
         unit: r['unit'] === null || r['unit'] === undefined ? '' : String(r['unit']),
         sortOrder: Number(r['sort_order'] ?? 0),
@@ -2790,7 +2776,7 @@ function cmdGroupList(args: ParsedArgs, dataDir: string): number {
         expired: e.some((x) => x.alertKind === 'expire' && x.expired),
         /** 只过保 */
         warrantyExpired: e.some((x) => x.alertKind === 'warranty' && x.expired),
-        location: [r['room'], r['container']].filter(Boolean).join(' / '),
+        location: r['container'],
       };
     };
 
@@ -2860,7 +2846,7 @@ function cmdGroupList(args: ParsedArgs, dataDir: string): number {
               get: (r) => (r['expires_on'] ? formatDaysLeft(daysUntil(String(r['expires_on']))) : '长期'),
               max: 14,
             },
-            { title: '位置', get: (r) => [r['room'], r['container']].filter(Boolean).join('/'), max: 22 },
+            { title: '位置', get: (r) => String(r['container'] ?? ''), max: 28 },
           ],
           { indent: 2 + depth * 2 },
         );
@@ -2918,7 +2904,7 @@ function cmdTimeline(args: ParsedArgs, dataDir: string): number {
         daysLeftText: e.daysLeftText,
         expired: e.expired,
         slot: slotIndexOf(e.expiresOn, slots),
-        location: [e.item['room'], e.item['container']].filter(Boolean).join(' / '),
+        location: e.item['container'],
       })),
       longTerm: g.longTerm.map((l) => ({
         itemUuid: String(l.item['uuid'] ?? ''),
@@ -2956,7 +2942,7 @@ function cmdTimeline(args: ParsedArgs, dataDir: string): number {
           { title: '名称', get: (e) => e.itemName, max: 40 },
           { title: '类型', get: (e) => e.kind, max: 14 },
           { title: '到期日', get: (e) => e.expiresOn, max: 12 },
-          { title: '位置', get: (e) => e.location, max: 26 },
+          { title: '位置', get: (e) => String(e.location ?? ''), max: 26 },
           { title: '落在', get: (e) => slots[e.slot]?.label ?? '范围外', max: 16 },
         ],
         { indent: 2 },
@@ -3520,10 +3506,9 @@ const COMMANDS: Command[] = [
   {
     path: ['item', 'list'],
     summary: '列出物品',
-    usage: 'item list [--category][--room][--search][--expiring N][--low-stock][--all][--limit N]',
+    usage: 'item list [--category][--search][--expiring N][--low-stock][--all][--limit N]',
     options: [
       { name: 'category', short: 'c', type: 'string', desc: '按分类过滤', valueName: 'key' },
-      { name: 'room', type: 'string', desc: '按房间过滤', valueName: '房间' },
       { name: 'search', short: 's', type: 'string', desc: '按名称/品牌/型号/条码搜索', valueName: '关键词' },
       { name: 'status', type: 'string', desc: '按状态过滤（in_stock/consumed/…）', valueName: 'key' },
       { name: 'expiring', type: 'number', desc: '只看 N 天内到期的', valueName: 'N' },
@@ -3592,9 +3577,9 @@ const COMMANDS: Command[] = [
       { name: 'expiresOn', type: 'string', desc: '这一组的到期日', valueName: '日期' },
       { name: 'expiresYm', type: 'string', desc: '只到月份时填 YYYY-MM', valueName: '年月' },
       { name: 'longTerm', type: 'boolean', desc: '这一组长期有效' },
-      { name: 'purchasedOn', type: 'string', desc: '这一组的购买日期', valueName: '日期' },
+      { name: 'purchasedOn', type: 'string', desc: '这一组的入库日期', valueName: '日期' },
       { name: 'unitPrice', type: 'string', desc: '这一组的单价（元）', valueName: '元' },
-      { name: 'store', type: 'string', desc: '购买渠道', valueName: '名称' },
+      { name: 'store', type: 'string', desc: '来源渠道', valueName: '名称' },
       { name: 'notes', type: 'string', desc: '备注', valueName: '文本' },
       DRY_RUN,
     ],
@@ -3820,7 +3805,7 @@ function printCommandHelp(cmd: Command): void {
     write('需要按个数管理时加 --bulk，之后 --qty / --remaining / --min-stock 才生效。');
     write('\nJSON 批量录入的键名同时接受列名与驼峰写法，例如：');
     write('  [{ "name": "创可贴", "category": "medical_device", "qty": 1,');
-    write('     "expiresYm": "2028-06", "unitPrice": "29.90", "room": "客厅" }]');
+    write('     "expiresYm": "2028-06", "unitPrice": "29.90", "container": "客厅药箱" }]');
   }
   write('\n全局选项同样可用（--json / --ws / --data-dir / --quiet / --yes / --dry-run）。');
 }

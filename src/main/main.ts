@@ -414,8 +414,8 @@ function buildExtraPayload(row: Row): {
 } {
   const s = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
 
-  // 位置是 room + container 两列拼出来的，展开区里当一栏用
-  const location = [s(row['room']), s(row['container'])].filter(Boolean).join(' / ');
+  // 位置只有一个自由文本字段（房间那一级已取消）
+  const location = s(row['container']);
 
   const fields = [
     { key: 'location', label: '位置', value: location },
@@ -711,10 +711,6 @@ function registerHandlers(): void {
       if (typeof filter['category'] === 'string' && filter['category']) {
         where.push('category = ?');
         params.push(filter['category']);
-      }
-      if (typeof filter['room'] === 'string' && filter['room']) {
-        where.push('room = ?');
-        params.push(filter['room']);
       }
       if (typeof filter['status'] === 'string' && filter['status']) {
         where.push('status = ?');
@@ -1013,7 +1009,7 @@ function registerHandlers(): void {
    * 展开区：保存。
    *
    * 传进来的 patch 里：
-   *   - 属于真实字段的键（room/container/spec/notes）写回各自的列
+   *   - 属于真实字段的键（container/spec/notes）写回各自的列
    *   - 其余键进 `extra_json`，**值为空串表示删除该字段**
    *
    * 分成两拨写是刻意的：位置要参与分组、规格要参与搜索、备注要参与导出，
@@ -1034,8 +1030,9 @@ function registerHandlers(): void {
 
       for (const [k, raw] of Object.entries(incoming)) {
         const text = raw === null || raw === undefined ? '' : String(raw);
-        if (k === 'room' || k === 'container' || k === 'spec' || k === 'notes') {
-          values[k] = text;
+        if (k === 'container' || k === 'location' || k === 'spec' || k === 'notes') {
+          // 界面把位置叫 location，库里那列叫 container
+          values[k === 'location' ? 'container' : k] = text;
         } else if (k === 'name' || k === 'category' || k === 'extra_json') {
           // 这几个不接受从这个入口改：名称/分类有自己的表单，
           // extra_json 由下面的 custom 计算，直接放行会绕过校验
@@ -1123,7 +1120,7 @@ function registerHandlers(): void {
           daysLeftText: e.daysLeftText,
           expired: e.expired,
           slot: slotIndexOf(e.expiresOn, slots),
-          location: [e.item['room'], e.item['container']].filter(Boolean).join(' / '),
+          location: e.item['container'] ?? null,
           remaining: Number(e.item['remaining'] ?? 0),
           isBulk: e.item['is_bulk'] === 'true',
           unit: e.item['unit'] === null ? '' : String(e.item['unit'] ?? ''),
@@ -1233,7 +1230,7 @@ function registerHandlers(): void {
         code: String(r['code'] ?? ''),
         name: String(r['name'] ?? ''),
         category: String(r['category'] ?? ''),
-        location: [r['room'], r['container']].filter(Boolean).join(' / '),
+        location: r['container'] ?? null,
       }));
 
       if (dryRun === true) return { purged: 0, items: list, dryRun: true };
@@ -1306,7 +1303,7 @@ function registerHandlers(): void {
           expired: e.expired,
           category: String(e.item['category'] ?? ''),
           brand: e.item['brand'] === null ? null : String(e.item['brand'] ?? ''),
-          location: [e.item['room'], e.item['container']].filter(Boolean).join(' / '),
+          location: e.item['container'] ?? null,
           remaining: Number(e.item['remaining'] ?? 0),
           quantity: Number(e.item['quantity'] ?? 0),
           isBulk: e.item['is_bulk'] === 'true',
@@ -1317,7 +1314,7 @@ function registerHandlers(): void {
           itemName: String(l.item['name'] ?? ''),
           category: String(l.item['category'] ?? ''),
           brand: l.item['brand'] === null ? null : String(l.item['brand'] ?? ''),
-          location: [l.item['room'], l.item['container']].filter(Boolean).join(' / '),
+          location: l.item['container'] ?? null,
           remaining: Number(l.item['remaining'] ?? 0),
           quantity: Number(l.item['quantity'] ?? 0),
           isBulk: l.item['is_bulk'] === 'true',

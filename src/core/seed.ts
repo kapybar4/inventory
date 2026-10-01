@@ -49,7 +49,6 @@ interface SeedThing {
   spec?: string;
   unit?: string;
   barcode?: string;
-  room?: string;
   container?: string;
   minStock?: number;
   warrantyMonths?: number;
@@ -68,8 +67,7 @@ const SEED: SeedThing[] = [
     spec: '0.3g×20粒',
     unit: '盒',
     barcode: '6901234567892',
-    room: '客厅',
-    container: '药箱-上层',
+    container: '客厅药箱-上层',
     notes: '退烧镇痛，24 小时内不超过 2 粒',
     purchases: [
       // 同一件药买了两次 —— 新结构下这是两条记录，各自算自己的到期
@@ -83,8 +81,7 @@ const SEED: SeedThing[] = [
     brand: '泰诺林',
     spec: '100ml',
     unit: '瓶',
-    room: '客厅',
-    container: '药箱-上层',
+    container: '客厅药箱-上层',
     openShelfLifeDays: 30,
     notes: '开封后 30 天内有效，儿童用药',
     purchases: [
@@ -97,8 +94,7 @@ const SEED: SeedThing[] = [
     brand: '可乐必妥',
     spec: '5ml',
     unit: '支',
-    room: '卧室',
-    container: '床头柜抽屉',
+    container: '卧室床头柜抽屉',
     prescription: true,
     openShelfLifeDays: 28,
     notes: '处方药，开封后 28 天必须丢弃',
@@ -112,8 +108,7 @@ const SEED: SeedThing[] = [
     brand: '海氏海诺',
     spec: '100支/盒',
     unit: '盒',
-    room: '客厅',
-    container: '药箱-下层',
+    container: '客厅药箱-下层',
     minStock: 1,
     purchases: [
       { bulk: true, quantity: 2, remaining: 1, expiresInMonths: 14, unitPriceYuan: 15.9, purchasedDaysAgo: 90, store: '天猫超市' },
@@ -125,8 +120,7 @@ const SEED: SeedThing[] = [
     brand: 'Ddrops',
     spec: '2.5ml',
     unit: '瓶',
-    room: '厨房',
-    container: '调味架',
+    container: '厨房调味架',
     purchases: [
       { quantity: 1, expiresInDays: 55, unitPriceYuan: 128.0, purchasedDaysAgo: 200, store: 'iHerb' },
     ],
@@ -137,8 +131,7 @@ const SEED: SeedThing[] = [
     brand: '维达',
     spec: '3层×120抽',
     unit: '包',
-    room: '储物间',
-    container: '货架-A',
+    container: '储物间货架-A',
     minStock: 6,
     notes: '一箱 24 包，分两批买的，到期日不同',
     // ── 一组库存：这批抽纸拆成三条，各自管自己的数量与到期日 ──
@@ -154,8 +147,7 @@ const SEED: SeedThing[] = [
     brand: '立白',
     spec: '52颗/盒',
     unit: '盒',
-    room: '阳台',
-    container: '洗衣机上方',
+    container: '阳台洗衣机上方',
     minStock: 2,
     purchases: [
       { bulk: true, quantity: 2, remaining: 1, expiresInDays: 150, unitPriceYuan: 45.0, purchasedDaysAgo: 200, store: '永辉超市' },
@@ -167,8 +159,7 @@ const SEED: SeedThing[] = [
     brand: '南孚',
     spec: '8粒装',
     unit: '板',
-    room: '储物间',
-    container: '货架-B',
+    container: '储物间货架-B',
     minStock: 2,
     purchases: [
       { bulk: true, quantity: 3, remaining: 1, expiresInDays: 900, unitPriceYuan: 19.9, purchasedDaysAgo: 120, store: '京东' },
@@ -181,8 +172,7 @@ const SEED: SeedThing[] = [
     model: 'M8R-FLP',
     spec: '适配 Pro H',
     unit: '个',
-    room: '客厅',
-    container: '净化器旁',
+    container: '客厅净化器旁',
     notes: '建议 6-12 个月更换',
     purchases: [
       { quantity: 1, expiresInDays: 75, unitPriceYuan: 299.0, purchasedDaysAgo: 300, warrantyInDays: 60, store: '小米商城' },
@@ -195,8 +185,7 @@ const SEED: SeedThing[] = [
     model: 'A1287',
     spec: '20000mAh',
     unit: '个',
-    room: '书房',
-    container: '抽屉-2',
+    container: '书房抽屉-2',
     warrantyMonths: 24,
     // 本体长期有效，只有质保期需要盯
     purchases: [
@@ -218,8 +207,7 @@ const SEED: SeedThing[] = [
     model: 'MX Master 3S',
     spec: '蓝牙 + 2.4G 双模',
     unit: '个',
-    room: '书房',
-    container: '桌面',
+    container: '书房桌面',
     warrantyMonths: 12,
     purchases: [
       {
@@ -239,8 +227,7 @@ const SEED: SeedThing[] = [
     brand: '爱他美',
     spec: '800g',
     unit: '罐',
-    room: '厨房',
-    container: '吊柜',
+    container: '厨房吊柜',
     minStock: 2,
     openShelfLifeDays: 28,
     notes: '开封后 4 周内用完',
@@ -256,8 +243,7 @@ const SEED: SeedThing[] = [
     brand: 'Lavazza',
     spec: '1kg',
     unit: '袋',
-    room: '厨房',
-    container: '咖啡角',
+    container: '厨房咖啡角',
     openShelfLifeDays: 45,
     purchases: [
       { bulk: true, quantity: 2, remaining: 1, expiresInMonths: 9, unitPriceYuan: 168.0, purchasedDaysAgo: 20, openedDaysAgo: 38, store: '山姆' },
@@ -269,8 +255,7 @@ const SEED: SeedThing[] = [
     brand: '珂润',
     spec: '40g',
     unit: '罐',
-    room: '卫生间',
-    container: '镜柜',
+    container: '卫生间镜柜',
     openShelfLifeDays: 365,
     purchases: [
       { quantity: 1, expiresInDays: 500, unitPriceYuan: 189.0, purchasedDaysAgo: 150, openedDaysAgo: 150, store: '屈臣氏' },
@@ -282,8 +267,7 @@ const SEED: SeedThing[] = [
     brand: '安热沙',
     spec: '60ml',
     unit: '瓶',
-    room: '玄关',
-    container: '出门篮',
+    container: '玄关出门篮',
     minStock: 1,
     purchases: [
       { quantity: 1, expiresInMonths: 11, unitPriceYuan: 219.0, purchasedDaysAgo: 120, store: '天猫国际' },
@@ -294,8 +278,7 @@ const SEED: SeedThing[] = [
     category: 'document',
     brand: '平安保险',
     unit: '份',
-    room: '书房',
-    container: '文件柜-车务',
+    container: '书房文件柜-车务',
     notes: '到期前需续保，否则无法上路',
     purchases: [{ quantity: 1, expiresInDays: 45, purchasedDaysAgo: 320, store: '平安好车主' }],
   },
@@ -303,16 +286,14 @@ const SEED: SeedThing[] = [
     name: '护照',
     category: 'document',
     unit: '本',
-    room: '书房',
-    container: '文件柜-证件',
+    container: '书房文件柜-证件',
     purchases: [{ quantity: 1, expiresInDays: 1000, purchasedDaysAgo: 900, store: '出入境管理局' }],
   },
   {
     name: '雨伞',
     category: 'other',
     unit: '把',
-    room: '玄关',
-    container: '伞架',
+    container: '玄关伞架',
     purchases: [{ quantity: 1, longTerm: true, unitPriceYuan: 79.0, purchasedDaysAgo: 60, store: '无印良品' }],
   },
 ];
@@ -382,7 +363,6 @@ export function seedWorkspace(dataDir: string, entry: WorkspaceEntry, now: Date 
             spec: thing.spec ?? null,
             unit: thing.unit ?? '件',
             barcode: thing.barcode ?? null,
-            room: thing.room ?? null,
             container: thing.container ?? null,
             is_bulk: 'true',
             quantity: '0', // 马上由子行汇总覆盖
@@ -429,7 +409,6 @@ export function seedWorkspace(dataDir: string, entry: WorkspaceEntry, now: Date 
             spec: thing.spec ?? null,
             unit: thing.unit ?? '件',
             barcode: thing.barcode ?? null,
-            room: thing.room ?? null,
             container: thing.container ?? null,
             // 没有拆成一组库存时，这一行自己就代表那个批量物品
             is_bulk: parentUuid ? 'false' : bulk ? 'true' : 'false',

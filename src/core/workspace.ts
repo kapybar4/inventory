@@ -677,7 +677,17 @@ export interface WorkspaceStats {
 
 export function workspaceStats(dataDir: string, entry: WorkspaceEntry): WorkspaceStats {
   const dbPath = workspaceDbPath(dataDir, entry);
-  const db = openDatabase(dbPath, { readOnly: true, skipMigrate: true });
+  /**
+   * **以可写方式打开，让懒迁移先跑完**，再自检。
+   *
+   * 当初是怎么坏的：这里用 `readOnly + skipMigrate`，于是库永远停在旧版本，
+   * 而自检又把"版本落后"当异常、`ws verify` 据此**自动隔离** ——
+   * 每次升 schema 之后所有工作区一起被锁死，用户被自己的安全机制挡在门外。
+   *
+   * 自检要回答的是"这份数据坏没坏"，不是"它是不是最新结构"。
+   * 先迁移到当前结构，再判健康度，才是想问的那个问题。
+   */
+  const db = openDatabase(dbPath);
   try {
     const verify = verifyDatabase(db);
     const tableCounts: Record<string, number> = {};

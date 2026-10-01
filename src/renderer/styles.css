@@ -1151,12 +1151,20 @@ tbody tr.stock-sub td {
   margin-bottom: 8px;
 }
 
+/*
+ * 分组标题与它下面的表格要**看起来是一块**。
+ *
+ * 原来两边各带圆角：标题悬停时露出一块圆角矩形，下面紧跟着另一个圆角
+ * 表格，中间还夹一道缝 —— 视觉上是两个东西拼在一起，很割裂。
+ * 现在标题上方两角圆、下方两角直，表格上方两角直，接缝去掉，
+ * 悬停高亮也从标题一直连到表格边缘。
+ */
 .group-head {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 7px 12px;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
   cursor: pointer;
   user-select: none;
   border-left: 2px solid transparent;
@@ -1187,7 +1195,13 @@ tbody tr.stock-sub td {
 
 .group-section.lv-1 > .group-head {
   border-top: 1px solid var(--line-soft);
-  border-radius: 0;
+  /*
+   * 上一行那条边与表格的边框**重复**了（标题在下、表格在上，中间那道缝看着像两个块）。
+   * 用上方两角圆 + 下方两角直，让它和下面的表格连成一块。
+   * 早先这里写的是 `border-radius: 0`，把基础规则整个盖掉 —— 于是悬停时
+   * 露出一块方角矩形，紧挨着一个圆角表格，很割裂。
+   */
+  border-radius: var(--r-sm) var(--r-sm) 0 0;
   padding-top: 10px;
   padding-bottom: 8px;
 }
@@ -1554,12 +1568,37 @@ p.muted,
 
 /* ───────────────────────── 表格 ───────────────────────── */
 
+/*
+ * 表格是页面的最后一块时，不要卡在 62vh —— 那会在下面留一大片空白。
+ *
+ * 62vh 的上限本来是为了"表格比页面高时它自己滚，工具条别被顶走"。
+ * 但物品页的表格是页面的收尾，页面的滚动区本身就是 #view，
+ * 再套一层高度上限就纯属浪费：内容没到 62vh 时留白，到了又要滚两次。
+ * 用 :has() 判断"后面没别的了"，让这种情况自然撑满。
+ */
 .table-wrap {
   border: 1px solid var(--line-soft);
   border-radius: var(--r);
   overflow: auto;
   background: var(--bg-1);
   max-height: 62vh;
+}
+
+.table-wrap:last-child {
+  max-height: none;
+}
+
+/*
+ * 分组里的表格：**上方两角要直**，和上面那条组标题接成一块。
+ *
+ * 这条必须放在 `.table-wrap` 基础规则**之后** —— 两者特异性相同，
+ * 靠后写的赢。早先它写在文件更靠前的位置，被基础规则整个盖掉，
+ * 于是标题方角、表格圆角，中间还夹一道边框，看着像两个东西拼在一起。
+ */
+.group-section > .table-wrap {
+  border-radius: 0 0 var(--r) var(--r);
+  border-top-color: transparent;
+  margin-top: 0;
 }
 
 table {

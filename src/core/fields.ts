@@ -246,13 +246,22 @@ export const TABLES: TableDef[] = [
       },
       { name: 'unit', kind: 'string', label: '单位', default: '件', validation: { maxLength: 20 } },
       { name: 'barcode', kind: 'string', label: '条码', validation: { maxLength: 64 } },
-      { name: 'room', kind: 'string', label: '房间', validation: { maxLength: 60 }, description: '存放位置第一级' },
+      /**
+       * 存放位置。
+       *
+       * **不再分「房间」和「容器」两级** —— 房间太细了，大多数人只会写一个
+       * 「客厅药箱-上层」这样的整体位置，逼着拆两级只会让人卡在第一个框上。
+       * 现在一个自由文本字段，爱写多细写多细。
+       *
+       * 存储列名保留 `container`：它已经在导出包里出现过，改名字等于让老归档
+       * 读不回来，而收益只是"名字更好听"。界面上一律叫「位置」。
+       */
       {
         name: 'container',
         kind: 'string',
-        label: '容器/柜格',
-        validation: { maxLength: 60 },
-        description: '存放位置第二级，如 客厅药箱-上层',
+        label: '位置',
+        validation: { maxLength: 120 },
+        description: '如 客厅药箱-上层。写多细都行，不填也可以',
       },
 
       // ── 数量 ──
@@ -291,10 +300,20 @@ export const TABLES: TableDef[] = [
       },
 
       // ── 购买与价格 ──
-      { name: 'purchased_on', kind: 'date', label: '购买日期' },
+      /**
+       * 入库时间 —— **通用的"这件东西从什么时候开始算"**。
+       *
+       * 药品食品的生产日期、数码产品的购入时间、证件的签发日期，都填这里。
+       * 刻意不做按分类区分：同一样东西对一个人是"生产"对另一个人是"买到"，
+       * 而它们在这套系统里的作用完全一样 —— 时间轴的起点、保质期的参照。
+       *
+       * 存储列名保留 `purchased_on`（导出包里已经用它，改名会让老归档读不回来），
+       * 但**语义与显示名都以"入库"为准**。
+       */
+      { name: 'purchased_on', kind: 'date', label: '入库日期' },
       { name: 'unit_price_cents', kind: 'money_cents', label: '单价（分）', validation: { min: 0 }, description: '以整数分存储，避免浮点误差' },
       { name: 'amount_cents', kind: 'money_cents', label: '总价（分）', validation: { min: 0 } },
-      { name: 'store', kind: 'string', label: '购买渠道', validation: { maxLength: 80 } },
+      { name: 'store', kind: 'string', label: '来源渠道', validation: { maxLength: 80 } },
 
       // ── 到期 ──
       // 只保留「一个到期日，或者干脆没有」两种状态。

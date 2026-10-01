@@ -180,6 +180,29 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   数据目录可能写不进去。`DSH_INVENTORY_BOOTSTRAP_HOME` 可以把它整个挪走，
   **功能测试必须设它** —— 否则测一次就往真机 `%LOCALAPPDATA%` 写一份配置，
   而那份配置会影响真实应用下次启动去哪找数据。
+- **迁移期间必须 `PRAGMA foreign_keys = OFF`，否则重建表会连坐删掉子表数据。**
+  `rebuildTable` 走的是「建新表 → 搬数据 → `DROP TABLE` 原表 → 改名」，
+  而 `stock_moves.item_uuid` 上有 `ON DELETE CASCADE` —— `DROP TABLE items`
+  会把**所有流水删光**。迁移看起来完全成功（结构对、自检过），只是数据少了。
+  触发条件很常见：任何需要重建 items 的结构升级都会中招。
+  pragma 必须在事务**外**设置（SQLite 不允许在事务里改它），
+  出错路径也要恢复。回归测试见「重建 items 时不能连坐删掉 stock_moves」。
+- **结构版本落后 ≠ 数据损坏。** `verifyDatabase` 的 `ok` 只看完整性与外键，
+  版本只作备注。当初把版本不一致也算进 `ok: false`，而 `ws verify` 据此
+  **自动隔离** —— 于是每次升 schema 之后所有工作区一起被锁死，
+  用户被自己的安全机制挡在门外。`workspaceStats` 现在以**可写**方式打开库，
+  让懒迁移先跑完再判健康度。
+- **取消「房间」那一级了**：位置只有 `container` 一个自由文本字段
+  （界面叫「位置」）。存储列名没改 —— 它已在导出包里出现过，
+  改名等于让老归档读不回来。v1 迁移会把旧的 `room` + `container`
+  **拼起来**（「客厅」+「药箱-上层」→「客厅药箱-上层」），不是丢掉一半。
+- **`purchased_on` 的语义是「入库」**（通用的开始时间：生产日期 / 购入时间 /
+  签发日期都填这里），界面与 CLI 文案一律叫「入库日期」。
+  列名同样保留不改，理由同上。
+- **界面上的 `schema` 页签用 `.hidden` 隐藏，不是删掉。**
+  那一页与 `schema show` 命令在排查问题、写导入脚本时还要用。
+  页签选择器一律写成 `.tab:not(.hidden)`，否则会给隐藏按钮绑事件、
+  也会把 `.active` 加到看不见的按钮上。
 - **应用显示名（`APP_NAME`）与机器标识是两回事**。显示名可以改（现在叫 `Inventory`），
   但 `APP_FORMAT` / `REGISTRY_FORMAT` / 数据目录名里那些 `dsh-inventory-*`
   **一个字符都不能动**：改了老归档读不回来、老数据目录也找不到。
@@ -240,7 +263,7 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 100 项单元测试
+npm.cmd test            # 101 项单元测试
 npm.cmd run test:func   # 145 项 CLI/数据层功能测试
 npm.cmd run test:gui    # 34 步桌面端走查（要开 Electron）
 npm.cmd run test:all    # 单元 + 功能
@@ -344,7 +367,7 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、单元 100 项、CLI 145 项、往返不变式。
+**已验证**：核心功能、单元 101 项、CLI 145 项、往返不变式。
 桌面端走查的 34 步现在跑不完（见下），改界面时改用聚焦探针确认。
 
 **没验证**：

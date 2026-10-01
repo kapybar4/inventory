@@ -112,5 +112,8 @@ END`,
  *   v4 = 分类可留空（未分类）、加 sort_order（手动顺序）
  *   v5 = 加 model（型号，与 spec 规格分开）
  *   v6 = 加 extra_json（补充信息，扁平 JSON）
+ *   v7 = 取消 alert_level（改成按日期来源自动分「过期 / 过保」）
+ *   v8 = 加 code 的内部定位约束、sort_order 回填
+ *   v9 = 取消 room（房间太细），位置只留 container 一个自由文本字段
  */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;

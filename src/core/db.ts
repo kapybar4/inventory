@@ -84,32 +84,53 @@ export function openDatabase(dbPath: string, opts: DbOptions = {}): DatabaseSync
 
 /** 结构全部由 fields.ts 生成，所以迁移就是「确保结构与当前定义一致」 */
 export function migrate(db: DatabaseSync): void {
-  db.exec('BEGIN');
+  /**
+   * 重建期间**关掉外键强制**。
+   *
+   * 当初是怎么坏的：`rebuildTable` 用「建新表 → 搬 → DROP 原表 → 改名」，
+   * 而 `stock_moves.item_uuid` 上有 `ON DELETE CASCADE` ——
+   * `DROP TABLE items` 于是把所有流水**连带删光**。
+   * 迁移看起来成功了（自检全过），数据却少了，这是最难发现的一类 bug：
+   * 它只在"有子表引用被重建的表"时发生，而 schema 升级恰好经常要重建 items。
+   *
+   * 关掉之后重建仍是安全的：搬过去的主键一个没变，
+   * 重建前后引用关系都成立；迁移末尾的 `verifyDatabase` 还会跑一次
+   * `PRAGMA foreign_key_check`，真有孤儿行会被抓出来。
+   *
+   * 注意 pragma 必须在事务**外**设置（SQLite 不允许在事务里改它），
+   * 所以放在 BEGIN 之前，出错路径也要恢复。
+   */
+  db.exec('PRAGMA foreign_keys = OFF');
   try {
-    const from = schemaVersionOf(db);
-    const isV1 = from > 0 && from < SCHEMA_VERSION && tableExists(db, 'batches');
-
-    if (isV1) {
-      // v1 不能直接跑 DDL：`CREATE TABLE IF NOT EXISTS items` 会静默跳过，
-      // 旧 items 保持 v1 的窄结构，后面搬数据就会报 no such column。
-      migrateV1ToV2(db);
-    }
-
-    // 顺序很重要：**先**把结构对齐到当前定义，**再**建索引与触发器。
-    // 反过来的话，`CREATE INDEX ... ON items(parent_uuid)` 会因为列还不存在而抛错，
-    // 整个迁移就停在这里了。
-    rebuildOutdatedTables(db);
-    for (const stmt of buildDdl()) db.exec(stmt);
-    backfillSortOrder(db);
-    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-    db.exec('COMMIT');
-  } catch (err) {
+    db.exec('BEGIN');
     try {
-      db.exec('ROLLBACK');
-    } catch {
-      /* ignore */
+      const from = schemaVersionOf(db);
+      const isV1 = from > 0 && from < SCHEMA_VERSION && tableExists(db, 'batches');
+
+      if (isV1) {
+        // v1 不能直接跑 DDL：`CREATE TABLE IF NOT EXISTS items` 会静默跳过，
+        // 旧 items 保持 v1 的窄结构，后面搬数据就会报 no such column。
+        migrateV1ToV2(db);
+      }
+
+      // 顺序很重要：**先**把结构对齐到当前定义，**再**建索引与触发器。
+      // 反过来的话，`CREATE INDEX ... ON items(parent_uuid)` 会因为列还不存在而抛错，
+      // 整个迁移就停在这里了。
+      rebuildOutdatedTables(db);
+      for (const stmt of buildDdl()) db.exec(stmt);
+      backfillSortOrder(db);
+      db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      db.exec('COMMIT');
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        /* ignore */
+      }
+      throw err;
     }
-    throw err;
+  } finally {
+    db.exec('PRAGMA foreign_keys = ON');
   }
 }
 
@@ -322,6 +343,16 @@ function migrateV1ToV2(db: DatabaseSync): void {
         const v = batch[c];
         return v === undefined ? null : v;
       }
+      /**
+       * v1 的位置是 `room` + `container` 两级；现在合成一个自由文本字段。
+       *
+       * 老数据不能只留一半 —— 单写「客厅」太笼统，丢掉房间又会让"东西在哪"变模糊。
+       * 拼起来最接近用户当初填那个意思（「客厅」+「药箱-上层」→「客厅药箱-上层」）。
+       */
+      if (c === 'container' && parent['room'] !== undefined && parent['room'] !== null) {
+        const merged = [parent['room'], parent['container']].filter(Boolean).join('');
+        return merged === '' ? null : merged;
+      }
       const v = parent[c];
       if (v !== undefined) return v;
       // 旧表没有的列 → 用当前定义的默认值
@@ -378,11 +409,14 @@ export function schemaVersionOf(db: DatabaseSync): number {
 }
 
 export interface VerifyResult {
+  /** 数据本身是否健康。**结构版本落后不算不健康** —— 那只是还没迁移 */
   ok: boolean;
   integrity: string;
   foreignKeyViolations: number;
   schemaVersion: number;
   expectedSchemaVersion: number;
+  /** 库里的结构版本比当前定义旧，下次以可写方式打开会自动升级 */
+  outdated?: boolean;
   tableCounts: Record<string, number>;
   messages: string[];
 }
@@ -410,16 +444,31 @@ export function verifyDatabase(db: DatabaseSync): VerifyResult {
 
   if (integrity !== 'ok') messages.push(`完整性检查失败: ${integrity}`);
   if (fkViolations > 0) messages.push(`存在 ${fkViolations} 条外键悬空记录`);
-  if (schemaVersion !== SCHEMA_VERSION) {
-    messages.push(`结构版本不一致: 库内 ${schemaVersion}，当前定义 ${SCHEMA_VERSION}`);
+
+  /**
+   * 结构版本落后**不算损坏**，只作为备注。
+   *
+   * 当初是怎么坏的：这里把版本不一致也算进 `messages`，而 `messages` 非空
+   * 就等于 `ok: false`；`ws verify` 又对 `ok: false` 的工作区自动隔离。
+   * 于是每次升 schema（比如取消 room 列这次）之后，
+   * **所有工作区一起被锁死**，而且 `item list` 之类也读不了（它们同样跳过迁移），
+   * 用户被自己的安全机制挡在门外。
+   *
+   * 版本落后是**正常状态**：迁移是懒执行的，库会在第一次以可写方式打开时
+   * 自动升级。真正代表"数据坏了"的只有上面两条 —— 完整性、外键。
+   */
+  const outdated = schemaVersion !== SCHEMA_VERSION;
+  if (outdated) {
+    messages.push(`结构版本落后: 库内 ${schemaVersion}，当前定义 ${SCHEMA_VERSION}（下次可写打开时自动升级）`);
   }
 
   return {
-    ok: messages.length === 0,
+    ok: integrity === 'ok' && fkViolations === 0,
     integrity,
     foreignKeyViolations: fkViolations,
     schemaVersion,
     expectedSchemaVersion: SCHEMA_VERSION,
+    outdated,
     tableCounts,
     messages,
   };

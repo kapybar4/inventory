@@ -24,7 +24,13 @@
           <button data-tab="timeline" class="tab">时间轴</button>
           <button data-tab="items" class="tab">物品</button>
           <button data-tab="workspaces" class="tab">工作区</button>
-          <button data-tab="schema" class="tab">字段与格式</button>
+          <!--
+            「字段与格式」已从界面移除：那一页展示的是 manifest 与字段定义，
+            属于**内部实现**，日常用不到，摆在那里反而让人以为要自己配。
+            页面代码与 `schema show` 命令都保留（排查问题、写导入脚本时还要用），
+            只是不再出现在页签里。
+          -->
+          <button data-tab="schema" class="tab hidden">字段与格式</button>
         </nav>
       </header>
 

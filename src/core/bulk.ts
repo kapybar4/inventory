@@ -221,7 +221,6 @@ export function addStock(db: Db, parent: Row, values: Record<string, string | nu
     name: String(parent['name'] ?? ''),
     category: String(parent['category'] ?? 'other'),
     unit: parent['unit'] === null || parent['unit'] === undefined ? null : String(parent['unit']),
-    room: parent['room'] === null || parent['room'] === undefined ? null : String(parent['room']),
     container: parent['container'] === null || parent['container'] === undefined ? null : String(parent['container']),
     ...values,
     code: stockCode(db, parent),

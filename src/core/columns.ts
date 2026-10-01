@@ -94,11 +94,11 @@ export const ITEM_COLUMNS: ColumnDef[] = [
   { key: 'brand', label: '品牌', hint: '选填字段', defaultOn: true },
   { key: 'model', label: '型号', hint: '选填字段，与规格不同', defaultOn: true },
   { key: 'quantity', label: '数量', hint: '批量物品显示「剩余/总数」', defaultOn: true, align: 'right' },
-  { key: 'purchased', label: '购买日期', hint: '选填字段', defaultOn: true },
+  { key: 'purchased', label: '入库', hint: '这件东西从什么时候开始算：生产日期 / 购入时间 / 签发日期都填这里', defaultOn: true },
   {
     key: 'location',
     label: '位置',
-    hint: '房间 / 容器。默认收在展开区里 —— 打开这列会明显占宽度',
+    hint: '如 客厅药箱-上层。默认收在展开区里 —— 打开这列会明显占宽度',
     defaultOn: false,
   },
   {
@@ -216,7 +216,8 @@ export function columnText(key: ColumnKey, row: Row): string {
     case 'model':
       return s(row['model']);
     case 'location':
-      return [s(row['room']), s(row['container'])].filter(Boolean).join(' / ');
+      // 位置现在只有一个自由文本字段（房间那一级取消了）
+      return s(row['container']);
     case 'quantity':
       return s(row['remaining']);
     case 'purchased':

@@ -1182,7 +1182,7 @@ test('结构：只有 items 与 stock_moves，没有 batches；有 parent_uuid',
   for (const col of ['quantity', 'remaining', 'purchased_on', 'expires_on', 'unit_price_cents', 'store', 'status', 'is_bulk', 'parent_uuid', 'sort_order', 'brand', 'model', 'spec', 'extra_json']) {
     assert.ok(new RegExp(`\\b${col}\\b`).test(ddl), `items 应包含 ${col}`);
   }
-  assert.equal(SCHEMA_VERSION, 8);
+  assert.equal(SCHEMA_VERSION, 9);
 });
 
 test('品牌与型号是两个独立字段，都可选填', () => {
@@ -2266,6 +2266,96 @@ test('导入同一个归档两次 = 两个互相独立的工作区', () => {
 // v1 → 当前版本迁移
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * 重建表时不能把子表的数据连带删掉。
+ *
+ * 当初是怎么坏的：`rebuildTable` 用「建新表 → 搬 → `DROP TABLE` 原表 → 改名」，
+ * 而 `stock_moves.item_uuid` 上有 `ON DELETE CASCADE` —— `DROP TABLE items`
+ * 于是把所有流水**连带删光**。迁移看起来完全成功（自检全过、结构也对），
+ * 只是数据少了，这是最难发现的一类 bug。
+ *
+ * 触发条件很常见：**任何需要重建 items 的结构升级**都会中招。
+ * 所以这条测试造一个"少了某列"的 items 表，逼迁移去重建，
+ * 然后要求流水一条不少。
+ */
+test('回归：重建 items 时不能连坐删掉 stock_moves（ON DELETE CASCADE）', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const ws = createWorkspace(dataDir, { name: '带流水的库', id: 'ws_cascade' });
+    const dbPath = workspaceDbPath(dataDir, ws.entry);
+
+    // 先正常写两条物品 + 三条流水
+    let itemUuid = '';
+    {
+      const db = openDatabase(dbPath);
+      try {
+        const it = insertRow(db, 'items', { code: 'C-1', name: '甲', category: 'daily' });
+        itemUuid = String(it['uuid']);
+        for (const n of [1, 2, 3]) {
+          insertRow(db, 'stock_moves', {
+            item_uuid: itemUuid,
+            moved_on: '2026-01-0' + n,
+            qty_delta: '1',
+            reason: 'purchase',
+          });
+        }
+        assert.equal(countRows(db, 'stock_moves'), 3, '夹具：三条流水');
+      } finally {
+        db.close();
+      }
+    }
+
+    // 把 items 表改造成"缺一列"的旧形态，并把版本号退回去 → 下次打开必定重建
+    {
+      const db = openDatabase(dbPath, { skipMigrate: true });
+      try {
+        db.exec('PRAGMA foreign_keys = OFF');
+        db.exec('DROP INDEX IF EXISTS idx_items_parent');
+        db.exec('ALTER TABLE items DROP COLUMN container');
+        db.exec('PRAGMA user_version = 1');
+      } finally {
+        db.close();
+      }
+    }
+
+    // 重新打开 → 迁移会重建 items
+    const db = openDatabase(dbPath);
+    try {
+      assert.equal(countRows(db, 'items'), 1, '物品还在');
+      assert.equal(
+        countRows(db, 'stock_moves'),
+        3,
+        '流水必须一条不少 —— 为 0 就说明 DROP TABLE items 触发了级联删除',
+      );
+      // 结构确实被重建到当前定义
+      const cols = db.prepare('PRAGMA table_info(items)').all().map((r) => String(r['name']));
+      assert.ok(cols.includes('container'), 'container 列应当被补回来');
+      // 外键仍然成立
+      const fk = db.prepare('PRAGMA foreign_key_check').all() as unknown[];
+      assert.equal(fk.length, 0, '不该留下悬空引用');
+      // 迁移结束后外键强制必须恢复，否则后续写入会失去保护
+      const fkOn = db.prepare('PRAGMA foreign_keys').get() as { foreign_keys: number };
+      assert.equal(Number(fkOn.foreign_keys), 1, '迁移后必须把 foreign_keys 打开');
+    } finally {
+      db.close();
+    }
+
+    // 级联删除本身还得正常工作（别为了修迁移把约束废掉）
+    {
+      const db = openDatabase(dbPath);
+      try {
+        db.exec(`DELETE FROM items WHERE uuid = '${itemUuid}'`);
+        assert.equal(countRows(db, 'stock_moves'), 0, '删物品仍应连带删流水');
+      } finally {
+        db.close();
+      }
+    }
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
 test('v1 库迁移：每个批次展开成一条独立物品记录', () => {
   const root = tmpRoot();
   try {
@@ -2309,7 +2399,8 @@ test('v1 库迁移：每个批次展开成一条独立物品记录', () => {
       const first = rows.find((r) => r['code'] === 'MED-0001')!;
       assert.equal(first['name'], '布洛芬缓释胶囊', '继承物品名称');
       assert.equal(first['brand'], '芬必得', '继承品牌');
-      assert.equal(first['room'], '客厅', '继承位置');
+      // v1 的 room + container 两级现在合并成一个「位置」字段
+      assert.equal(first['container'], '客厅药箱-上层', '继承位置（房间与柜格合并）');
       assert.equal(first['quantity'], '1', '旧批次数量 2 迁移成普通物品后应被钳成 1');
       assert.equal(first['remaining'], '1');
       assert.equal(first['unit_price_cents'], '1930');

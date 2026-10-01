@@ -951,7 +951,7 @@ check('info 报出数据目录与工作区数', () => {
   const d = json(['info']).data.data;
   eq(d.dataDir, HOME, '数据目录');
   ok(d.workspaceCount > 0, '工作区数');
-  eq(d.schemaVersion, 8, '结构版本');
+  eq(d.schemaVersion, 9, '结构版本');
   return `${d.workspaceCount} 个工作区，schema v${d.schemaVersion}`;
 });
 
@@ -1199,17 +1199,18 @@ check('item extra：逐字段设置，自定义字段进 JSON', () => {
   return Object.keys(d.custom).join(',');
 });
 
-check('item extra：位置拆成 room / container 两列，不是塞进 JSON', () => {
-  cli(['item', 'extra', '空调', 'room', '客厅']);
-  cli(['item', 'extra', '空调', 'container', '净化器旁']);
+check('item extra：位置是真列（不是塞进 JSON）', () => {
+  cli(['item', 'extra', '空调', 'container', '客厅净化器旁']);
   const d = json(['item', 'extra', '空调']).data.data;
   const loc = d.fields.find((f) => f[0] === '位置');
-  eq(loc[1], '客厅 / 净化器旁', '位置拼出来了');
+  eq(loc[1], '客厅净化器旁', '位置读出来了');
   // 关键：它必须是真实列，否则分组、搜索、导出都会失效
   const it = json(['item', 'list', '--search', '空调']).data.data.items[0];
-  eq(it.room, '客厅', 'room 是真列');
-  eq(it.container, '净化器旁', 'container 是真列');
-  ok(!Object.keys(d.custom).includes('room'), '不该混进自定义字段里');
+  eq(it.container, '客厅净化器旁', 'container 是真列');
+  ok(!Object.keys(d.custom).includes('container'), '不该混进自定义字段里');
+  // location 是同一个字段在界面上的叫法，也要能写
+  cli(['item', 'extra', '空调', 'location', '书房抽屉']);
+  eq(json(['item', 'list', '--search', '空调']).data.data.items[0].container, '书房抽屉', 'location 别名也认');
   return '真实列';
 });
 
@@ -1264,11 +1265,13 @@ check('不是 JSON 对象也拒绝', () => {
   return 'exit 3 ×3';
 });
 
-check('location 有专门提示（别让人以为它进了 JSON）', () => {
-  const r = cli(['item', 'extra', '空调', 'location', '客厅']);
-  eq(r.code, 2, '退出码');
-  ok(/room/.test(r.err) && /container/.test(r.err), '应引导到 room / container');
-  return 'exit 2';
+check('location 与 container 是同一个字段，都写回真实列', () => {
+  cli(['item', 'extra', '空调', 'location', '阳台角落']);
+  const it = json(['item', 'list', '--search', '空调']).data.data.items[0];
+  eq(it.container, '阳台角落', 'location 写进了 container 列');
+  const d = json(['item', 'extra', '空调']).data.data;
+  ok(!Object.keys(d.custom).includes('location'), '不该混进自定义字段里');
+  return '别名';
 });
 
 check('item extra --dry-run 不落库', () => {
@@ -1294,7 +1297,7 @@ check('补充信息进导出包并原样还原', () => {
 check('列表接口不返回 extra_json（按需拉取）', () => {
   const it = json(['item', 'list', '--search', '空调']).data.data.items[0];
   ok(!('extra_json' in it), '列表里不该带上它 —— 绝大多数行不会被展开');
-  ok('spec' in it && 'notes' in it && 'room' in it, '真实字段仍在列表里');
+  ok('spec' in it && 'notes' in it && 'container' in it, '真实字段仍在列表里');
   return '按需加载';
 });
 

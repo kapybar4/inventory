@@ -115,10 +115,8 @@ function fieldExample(f: FieldDef): string | undefined {
       return '盒';
     case 'barcode':
       return '6901234567892';
-    case 'room':
-      return '客厅';
     case 'container':
-      return '药箱-上层';
+      return '客厅药箱-上层';
     case 'expires_ym':
       return '2027-03';
     case 'expires_on':

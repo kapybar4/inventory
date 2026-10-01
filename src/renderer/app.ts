@@ -197,7 +197,6 @@ interface ItemRow {
   spec: string | null;
   unit: string | null;
   barcode: string | null;
-  room: string | null;
   container: string | null;
   /** 是否开启「批量」：只有开启后数量才可设、可多次领用 */
   is_bulk: string;
@@ -492,7 +491,7 @@ const state: {
   items: ItemRow[];
   detail: ItemDetail | null;
   tab: 'dashboard' | 'groups' | 'timeline' | 'items' | 'workspaces' | 'schema';
-  filter: { search: string; category: string; room: string };
+  filter: { search: string; category: string };
   /** 分组页：服务端算好的树 + 本地筛选 */
   groupTree: GroupTreeResult | null;
   /** 排序字段；'manual' = 排序关闭，按拖动固定下来的顺序 */
@@ -538,7 +537,7 @@ const state: {
   items: [],
   detail: null,
   tab: 'dashboard',
-  filter: { search: '', category: '', room: '' },
+  filter: { search: '', category: '' },
   groupTree: null,
   sortField: 'manual',
   sortFields: [],
@@ -1149,7 +1148,6 @@ async function refreshItems(): Promise<void> {
   const filter: Record<string, unknown> = {};
   if (state.filter.search) filter['search'] = state.filter.search;
   if (state.filter.category) filter['category'] = state.filter.category;
-  if (state.filter.room) filter['room'] = state.filter.room;
   state.items = await window.api.item.list(state.wsId, filter);
 }
 
@@ -1221,7 +1219,7 @@ function updateTabCounts(): void {
     workspaces: state.wsList?.workspaces.length ?? 0,
     groups: a?.counts.items ?? 0,
   };
-  document.querySelectorAll('.tab').forEach((btn) => {
+  document.querySelectorAll('.tab:not(.hidden)').forEach((btn) => {
     const tab = (btn as HTMLElement).dataset['tab']!;
     btn.querySelector('.count')?.remove();
     const n = counts[tab];
@@ -1236,7 +1234,7 @@ function updateTabCounts(): void {
 
 function setTab(tab: typeof state.tab): void {
   state.tab = tab;
-  document.querySelectorAll('.tab').forEach((b) => {
+  document.querySelectorAll('.tab:not(.hidden)').forEach((b) => {
     b.classList.toggle('active', (b as HTMLElement).dataset['tab'] === tab);
   });
   render();
@@ -2306,7 +2304,7 @@ function itemCols(): ItemCol[] {
     {
       key: 'location',
       head: '位置',
-      cell: (it) => td([it.room, it.container].filter(Boolean).join(' / '), 'muted'),
+      cell: (it) => td(it.container ?? '', 'muted'),
     },
     {
       key: 'quantity',
@@ -2342,7 +2340,7 @@ function itemCols(): ItemCol[] {
     {
       key: 'location',
       head: '位置',
-      cell: (it) => td([it.room, it.container].filter(Boolean).join(' / '), 'muted'),
+      cell: (it) => td(it.container ?? '', 'muted'),
     },
     { key: 'spec', head: '规格', cell: (it) => td(it.spec ?? '', 'muted') },
     { key: 'notes', head: '备注', cell: (it) => td(it.notes ?? '', 'muted wrap') },
@@ -2494,31 +2492,21 @@ function buildExtraEditor(
 
   // ── 固定三项：位置 / 规格 / 备注 ──
   for (const f of data.fields) {
-    // 位置是 room + container 两列，展开区里当一栏
+    // 位置就是一个自由文本框（房间那一级取消了）
     if (f.key === 'location') {
       const row = el('div', { class: 'extra-field' });
       row.append(el('label', { class: 'extra-label', text: '位置' }));
-      const pair = el('div', { class: 'extra-pair' });
-
-      const mk = (label: string, key: 'room' | 'container', val: string): HTMLElement => {
-        const box = el('div');
-        box.append(el('span', { class: 'extra-sub', text: label }));
-        const inp = el('input', { type: 'text', name: `ex_${key}` }) as HTMLInputElement;
-        inp.value = val;
-        inp.placeholder = key === 'room' ? '如 客厅' : '如 药箱-上层';
-        let last = val;
-        inp.addEventListener('blur', () => {
-          if (inp.value === last) return;
-          last = inp.value;
-          void commit(key, inp.value);
-        });
-        box.append(inp);
-        return box;
-      };
-
-      // 列表行里已经带了 room / container，这里直接用，省一次请求
-      pair.append(mk('房间', 'room', it.room ?? ''), mk('容器 / 柜格', 'container', it.container ?? ''));
-      row.append(pair);
+      const inp = el('input', { type: 'text', name: 'ex_container' }) as HTMLInputElement;
+      inp.value = it.container ?? '';
+      inp.placeholder = '如 客厅药箱-上层';
+      let last = inp.value;
+      inp.addEventListener('blur', () => {
+        if (inp.value === last) return;
+        last = inp.value;
+        void commit('container', inp.value);
+      });
+      // 列表行里已经带了 container，直接用，省一次请求
+      row.append(inp);
       wrap.append(row);
       continue;
     }
@@ -2554,7 +2542,7 @@ function buildExtraEditor(
       keyInput.focus();
       return;
     }
-    if (key === 'location' || key === 'spec' || key === 'notes' || key === 'room' || key === 'container') {
+    if (key === 'location' || key === 'spec' || key === 'notes' || key === 'container') {
       // 这几个是固定项，别让用户以为加了个新的
       toast('「位置」「规格」「备注」已经在上面了，换个字段名', 'warn');
       return;
@@ -2614,18 +2602,6 @@ function renderItems(view: HTMLElement): void {
     void refreshItems().then(render);
   });
   bar.append(catSel);
-
-  const rooms = [...new Set(state.items.map((i) => i.room).filter((r): r is string => Boolean(r)))].sort();
-  const roomSel = select(
-    'room',
-    [{ value: '', label: '全部房间' }, ...rooms.map((r) => ({ value: r, label: r }))],
-    state.filter.room,
-  );
-  roomSel.addEventListener('change', () => {
-    state.filter.room = roomSel.value;
-    void refreshItems().then(render);
-  });
-  bar.append(roomSel);
 
   const colBtn = el('button', { class: 'ghost', text: '列设置' });
   colBtn.title = '选择这张表显示哪些列。「物品」与「到期时间」必须显示。';
@@ -3192,12 +3168,12 @@ function renderItemDetail(): void {
   add('型号', it.model ?? '');
   add('规格', it.spec ?? '');
   add('单位', it.unit ?? '');
-  add('存放位置', [it.room, it.container].filter(Boolean).join(' / '));
+  add('存放位置', it.container ?? '—');
   add('状态', enumLabel('item_status', it.status));
   add('批量物品', bulk ? '是' : '否');
   add('到期', d.expiry.length === 0 ? '长期' : d.expiry.map((e) => e.expiresOn).join(' / '));
-  add('购买日期', it.purchased_on ?? '');
-  add('购买渠道', it.store ?? '');
+  add('入库日期', it.purchased_on ?? '');
+  add('来源渠道', it.store ?? '');
   add('单价', d.unitPriceYuan ? `¥${d.unitPriceYuan}` : '');
   add('总价', d.amountYuan ? `¥${d.amountYuan}` : '');
   add('条码', it.barcode ?? '');
@@ -3415,9 +3391,9 @@ function openStockForm(itemUuid: string, stock: BulkStock | null): void {
   body.append(expiryField, ltWrap);
   applyLt();
 
-  body.append(field('购买日期', input('purchased_on', stock?.purchasedOn ?? '', 'date')));
+  body.append(field('入库日期', input('purchased_on', stock?.purchasedOn ?? '', 'date')));
   body.append(field('单价（元）', input('unitPriceYuan', stock?.unitPriceYuan ?? '', 'text', '如 2.50')));
-  body.append(field('购买渠道', input('store', stock?.store ?? '', 'text', '如 山姆')));
+  body.append(field('来源渠道', input('store', stock?.store ?? '', 'text', '如 山姆')));
   body.append(field('备注', input('notes', stock?.notes ?? '')));
 
   openModal({
@@ -3495,8 +3471,13 @@ function openItemForm(uuid: string | null): void {
   body.append(field('条码', input('barcode', existing?.barcode ?? '')));
 
   // ── 放在哪 ──
-  body.append(field('房间', input('room', existing?.room ?? '', 'text', '如 客厅'), '存放位置第一级'));
-  body.append(field('容器 / 柜格', input('container', existing?.container ?? '', 'text', '如 药箱-上层'), '存放位置第二级'));
+  body.append(
+    field(
+      '位置',
+      input('container', existing?.container ?? '', 'text', '如 客厅药箱-上层'),
+      '写多细都行，不填也可以',
+    ),
+  );
 
   // ── 多少 ──
   // 默认不是批量物品：数量恒为 1，这里只是展示，不给改
@@ -3545,8 +3526,8 @@ function openItemForm(uuid: string | null): void {
   applyBulk();
 
   // ── 买的 ──
-  body.append(field('购买日期', input('purchased_on', existing?.purchased_on ?? new Date().toISOString().slice(0, 10), 'date')));
-  body.append(field('购买渠道', input('store', existing?.store ?? '', 'text', '如 京东健康')));
+  body.append(field('入库日期', input('purchased_on', existing?.purchased_on ?? new Date().toISOString().slice(0, 10), 'date')));
+  body.append(field('来源渠道', input('store', existing?.store ?? '', 'text', '如 京东健康')));
 
   const priceWrap = el('div', { class: 'field' });
   priceWrap.append(el('span', { class: 'field-label', text: '单价（元）' }));
@@ -3815,7 +3796,7 @@ async function switchWorkspace(id: string): Promise<void> {
   try {
     await window.api.ws.use(id);
     state.wsId = id;
-    state.filter = { search: '', category: '', room: '' };
+    state.filter = { search: '', category: '' };
     await reloadAll();
   } catch (err) {
     fail(err);
@@ -3952,7 +3933,7 @@ async function doImport(): Promise<void> {
 // ─── 启动 ───
 
 function wireChrome(): void {
-  document.querySelectorAll('.tab').forEach((b) => {
+  document.querySelectorAll('.tab:not(.hidden)').forEach((b) => {
     b.addEventListener('click', () => setTab((b as HTMLElement).dataset['tab'] as typeof state.tab));
   });
 
