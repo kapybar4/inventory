@@ -426,6 +426,44 @@ check('item rm 需要 --yes，缺了会拒绝', () => {
   return 'exit 2 → 0';
 });
 
+/**
+ * 一次删多条。
+ *
+ * 界面上有两个入口要批量删（概览页逐条快速删除、物品页勾选后批量删除），
+ * 都走 `item:deleteMany`；命令行这条 `item rm a b c` 是同一件事的数据层形态。
+ * 这里验的是数据层不会"删一半"：给三个 uuid（其中一个不存在），
+ * 存在的都删掉、不存在的报出来而不让整批失败。
+ */
+check('item rm 一次删多条：存在的不落、缺失的不算失败', () => {
+  const f = join(ROOT, 'rm-many.json');
+  writeFileSync(f, JSON.stringify([{ name: '批量删甲' }, { name: '批量删乙' }, { name: '批量删丙' }]), 'utf8');
+  const made = json(['item', 'add', '--json-file', f]).data.data.created.map((c) => c.uuid);
+  eq(made.length, 3, '夹具三条');
+
+  const ghost = '01a0ffff-ffff-7fff-8fff-fffffffffffe';
+  const r = cli(['item', 'rm', made[0], made[1], ghost, '--yes']);
+  // 缺失的那条不该让整批失败 —— 界面上的清单是几秒前拉的，
+  // 期间别处可能已经删过一条，为此报错会让"删 3 条"变成办不成的事
+  eq(r.code, 0, '退出码');
+
+  eq(json(['item', 'show', made[0]]).code, 4, '第一条已删');
+  eq(json(['item', 'show', made[1]]).code, 4, '第二条已删');
+  eq(json(['item', 'show', made[2]]).code, 0, '没点到的第三条还在');
+  eq(json(['item', 'rm', made[2], '--yes']).data.data.removed.length, 1, '收尾：删掉第三条');
+  return '3 条里删 2 条，缺失不报错';
+});
+
+check('item rm 需要 --yes，缺了会拒绝', () => {
+  const uuid = json(['item', 'add', '--name', '待删', '-c', 'daily']).data.data.created[0].uuid;
+  const r = cli(['item', 'rm', uuid]);
+  eq(r.code, 2, '退出码');
+  ok(json(['item', 'show', uuid]).code === 0, '记录还在');
+  const okr = cli(['item', 'rm', uuid, '--yes']);
+  eq(okr.code, 0, '带 --yes 成功');
+  ok(json(['item', 'show', uuid]).code === 4, '记录已删');
+  return 'exit 2 → 0';
+});
+
 // ═════════════════════════════════════════════════════════════
 // 4. 到期 / 长期
 // ═════════════════════════════════════════════════════════════

@@ -2033,6 +2033,83 @@ tbody tr.selected .ops {
   display: none !important;
 }
 
+/*
+ * 纯图标按钮（目前只有垃圾桶）。
+ *
+ * 尺寸固定成正方形，否则 SVG 会让按钮高度和旁边的文字按钮对不齐 ——
+ * 它没有文字行高，靠内容撑会矮一截。
+ * 颜色不写死，靠 `.danger-text` 在悬停时才变红：
+ * 常红会让一列垃圾桶变成视觉噪音，而删除本来就该是"想找才找得到"的操作。
+ */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-faint);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.icon-btn.small {
+  width: 22px;
+  height: 22px;
+}
+
+.icon-btn:hover {
+  background: var(--danger-dim);
+  border-color: var(--danger);
+  color: #ffc4c0;
+}
+
+.icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* 表格末尾的操作列：内容窄，别让它抢宽度 */
+.col-act,
+th.col-act {
+  width: 34px;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/*
+ * 批量选择：复选框列。
+ *
+ * 宽度写死，这样进入/退出批量模式时其它列不会左右跳 ——
+ * 跳一下很烦，视线要重新找位置。
+ */
+.col-batch,
+th.col-batch {
+  width: 34px;
+  text-align: center;
+  padding-left: 10px;
+}
+
+.batch-box {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--danger);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+/* 选中行：左侧一条红边 + 淡底，一眼看出哪些会被删 */
+tr.batch-on > td {
+  background: var(--danger-dim);
+}
+
+tr.batch-on > td:first-child {
+  box-shadow: inset 2px 0 0 var(--danger);
+}
+
 .modal {
   background: var(--bg-1);
   border: 1px solid var(--line-strong);

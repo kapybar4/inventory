@@ -56,6 +56,12 @@ const api = {
     purgeSpent: (wsId: string | null, dryRun?: boolean) => call('item:purgeSpent', wsId, dryRun === true),
     delete: (wsId: string | null, uuid: string) => call('item:delete', wsId, uuid),
     /**
+     * 一次删多条，**在一个事务里做完**。
+     * 已经不存在的 uuid 跳过（计入 missing）而不报错 ——
+     * 界面上的清单可能是几秒前拉的，期间别处可能已经删过那一条。
+     */
+    deleteMany: (wsId: string | null, uuids: string[]) => call('item:deleteMany', wsId, uuids),
+    /**
      * 展开区：位置 / 规格 / 备注 + 这件东西自己的补充字段。
      *
      * 保存时值为空串表示删除该字段；位置/规格/备注会写回各自的真实列，

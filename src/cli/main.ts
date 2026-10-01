@@ -396,8 +396,18 @@ function makeCodeAllocator(db: Db): (category: string) => string {
  *
  * 界面上不再显示编号，但命令行仍然可以用它定位 —— 比逼用户去复制 UUID 友好。
  * 名称命中多条时会明确报错并列出候选，而不是悄悄取第一条。
+ *
+ * 两种签名：
+ *   - `findItem(db, key)` → 找不到就抛「未找到」（绝大多数调用点要这个）
+ *   - `findItem(db, key, { optional: true })` → 找不到返回 null
+ *
+ * 批量操作要用后者：「删 3 条、其中 1 条已被别处删掉」不该让整批失败。
+ * 注意"匹配到多条"**两种签名都抛错** —— 那是**歧义**不是"不存在"，
+ * 悄悄跳过会让用户以为删掉了，其实一条没动。
  */
-function findItem(db: Db, key: string): Row {
+function findItem(db: Db, key: string): Row;
+function findItem(db: Db, key: string, opts: { optional: true }): Row | null;
+function findItem(db: Db, key: string, opts?: { optional?: boolean }): Row | null {
   const exact = selectOne(db, 'items', 'uuid = ? OR code = ?', [key, key], { includeInternal: true });
   if (exact) return exact;
 
@@ -415,6 +425,7 @@ function findItem(db: Db, key: string): Row {
   const byPrefix = selectWhere(db, 'items', 'uuid LIKE ?', [`${key}%`], { includeInternal: true });
   if (byPrefix.length === 1) return byPrefix[0]!;
   if (byPrefix.length > 1) throw new ArgError(`物品标识 "${key}" 不唯一，匹配到 ${byPrefix.length} 条`);
+  if (opts?.optional) return null;
   throw new WorkspaceNotFoundError(`物品 ${key}`);
 }
 
@@ -2325,6 +2336,17 @@ function cmdItemStock(args: ParsedArgs, dataDir: string): number {
   }
 }
 
+/**
+ * 删除物品记录（一条或多条，连带删除流水）。
+ *
+ * **找不到的 key 跳过并报出来，不让整批失败。**
+ *
+ * 当初是 `findItem` 直接抛 NotFound，于是"删 3 条、其中 1 条已被别处删掉"
+ * 会整批 exit 4、一条也删不成。界面上的清单是几秒前拉的，期间别处
+ * （概览页的垃圾桶、另一个窗口）完全可能已经删过一条 ——
+ * 为此办不成事，比删少一条糟得多。界面侧的 `item:deleteMany` 也是这个语义，
+ * 两边必须一致，否则同一个操作在命令行和界面里是两个答案。
+ */
 function cmdItemRm(args: ParsedArgs, dataDir: string): number {
   const entry = resolveWorkspace(dataDir, str(args, 'ws'));
   const keys = args._;
@@ -2336,9 +2358,14 @@ function cmdItemRm(args: ParsedArgs, dataDir: string): number {
 
   const db = openDatabase(workspaceDbPath(dataDir, entry));
   const done: { uuid: string; code: string; name: string }[] = [];
+  const missing: string[] = [];
   try {
     for (const key of keys) {
-      const item = findItem(db, key);
+      const item = findItem(db, key, { optional: true });
+      if (!item) {
+        missing.push(key);
+        continue;
+      }
       const info = { uuid: String(item['uuid']), code: String(item['code']), name: String(item['name']) };
       if (!bool(args, 'dryRun')) deleteRow(db, 'items', info.uuid);
       done.push(info);
@@ -2348,11 +2375,19 @@ function cmdItemRm(args: ParsedArgs, dataDir: string): number {
   }
 
   if (out.json) {
-    emitJson({ dryRun: bool(args, 'dryRun'), removed: done });
+    emitJson({ dryRun: bool(args, 'dryRun'), removed: done, missing });
     return EXIT.OK;
   }
-  write(bool(args, 'dryRun') ? `将删除 ${done.length} 条记录：` : `已删除 ${done.length} 条记录：`);
+  write(
+    bool(args, 'dryRun')
+      ? `将删除 ${done.length} 条记录：`
+      : `已删除 ${done.length} 条记录：`,
+  );
   for (const d of done) write(`  ${d.code}  ${d.name}`);
+  if (missing.length > 0) {
+    write(`\n${missing.length} 条没找到（可能已被删除）：`);
+    for (const m of missing) write(`  ${m}`);
+  }
   return EXIT.OK;
 }
 

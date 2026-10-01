@@ -367,6 +367,11 @@ interface DshApi {
       dryRun?: boolean,
     ): Promise<{ purged: number; items: { uuid: string; name: string; location: string }[]; dryRun: boolean }>;
     delete(wsId: string | null, uuid: string): Promise<{ deleted: boolean }>;
+  /** 一次删多条，在一个事务里做完。已不存在的 uuid 计入 missing 而不报错 */
+  deleteMany(
+    wsId: string | null,
+    uuids: string[],
+  ): Promise<{ deleted: number; missing: number; removed: string[] }>;
     /**
      * 展开区：位置 / 规格 / 备注 + 这件东西自己的补充字段。
      *
@@ -520,6 +525,19 @@ const state: {
    * 而且触发的入口不同，混在一个集合里会让"点箭头把库存明细也打开了"。
    */
   extraOpen: Set<string>;
+  /**
+   * 物品页的批量删除模式。
+   *
+   * 打开时每一行前面出现复选框，工具栏上的按钮变成「删除选中 (N)」。
+   * 之所以要两步（先进入模式、再勾选、再确认），是因为删除不可撤销：
+   * 常驻的复选框会让"误点"直接变成"误删"。
+   *
+   * `batchSelected` 只活在这一次选择里 —— 退出模式、换工作区、
+   * 删完之后都清空。留着上一条工作区的勾选状态去删另一个库里的东西，
+   * 是最不该发生的事。
+   */
+  batchMode: boolean;
+  batchSelected: Set<string>;
   /** 物品表当前显示哪些列。锁定列一定在里面（由 core 保证） */
   columnVisible: string[];
   /** 可配置的列清单，来自 core */
@@ -548,6 +566,8 @@ const state: {
   expanded: new Set<string>(),
   briefView: false,
   extraOpen: new Set<string>(),
+  batchMode: false,
+  batchSelected: new Set<string>(),
   columnVisible: [],
   columnAvailable: [],
   columnLocked: [],
@@ -1372,7 +1392,7 @@ function renderDashboard(view: HTMLElement): void {
     view.append(
       sectionTitle('最先到期的', allDated.length > 8 ? `共 ${allDated.length} 项，显示前 8 项` : `共 ${allDated.length} 项`),
     );
-    view.append(tableWrap(itemsTable(allDated.slice(0, 8))));
+    view.append(tableWrap(itemsTable(allDated.slice(0, 8), { quickDelete: true })));
   }
 
   if (a && a.lowStock.length > 0) {
@@ -1414,13 +1434,25 @@ function restockTable(rows: RestockRow[]): HTMLElement {
  * 用的是与物品页、分组页**同一份列配置** —— 三处是同一份物品清单，
  * 列不一致会让人以为看到的是不同的数据。
  */
-function itemsTable(items: ItemRow[]): HTMLElement {
+/**
+ * 通用物品表（概览页与别处的紧凑列表用）。
+ *
+ * `opts.quickDelete` 打开时，**已过期**的行末尾多一个垃圾桶图标 ——
+ * 概览页就是给你扫过期物品的，扫到之后最想做的事就是删掉它，
+ * 不该再逼你跳转到物品页、找到那一行、再点删除。
+ *
+ * 只给过期行加，不是所有行都加：一行一个垃圾桶会让整张表变吵，
+ * 而且平时删东西走物品页更稳妥（那里有编辑、展开、批量）。
+ */
+function itemsTable(items: ItemRow[], opts?: { quickDelete?: boolean }): HTMLElement {
+  const quickDelete = opts?.quickDelete === true;
   const cols = visibleItemCols(state.columnVisible);
   const t = el('table');
   const head = el('tr');
   for (const c of cols) {
     head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
   }
+  if (quickDelete) head.append(el('th', { class: 'col-act', text: '' }));
   t.append(el('thead', {}, head));
 
   const body = el('tbody');
@@ -1437,10 +1469,84 @@ function itemsTable(items: ItemRow[]): HTMLElement {
       if (c.key === 'name' && expired) cell.append(el('span', { class: 'tag danger', text: '已过期' }));
       tr.append(cell);
     }
+    if (quickDelete) {
+      const act = el('td', { class: 'col-act' });
+      if (expired) act.append(quickDeleteButton(it));
+      tr.append(act);
+    }
     body.append(tr);
   }
   t.append(body);
   return t;
+}
+
+/** 概览页行末的快速删除：点一下出来的是确认框，不是直接删 */
+function quickDeleteButton(it: ItemRow): HTMLElement {
+  const btn = trashButton(`删除「${it.name}」`);
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    confirmQuickDelete(it);
+  });
+  return btn;
+}
+
+/**
+ * 单条快速删除的确认框。
+ *
+ * 需求要的是"点一下就能删"，但删除不可撤销 —— 图标紧挨着表格内容，
+ * 误点很容易。折中是：**图标本身没有任何二次点击**（就是垃圾桶），
+ * 点完立刻弹一个只说这一件东西的确认框，按回车即删。
+ * 比"长按""再点一次图标"这些手势都直白。
+ */
+function confirmQuickDelete(it: ItemRow): void {
+  const body = el('div');
+  const wsName =
+    state.wsList?.workspaces.find((w) => w.id === state.wsList?.activeWorkspaceId)?.name ?? '当前工作区';
+  body.append(el('p', { text: `将从「${wsName}」删除这条记录。` }));
+
+  const t = el('table');
+  const hrow = el('tr');
+  for (const h of ['名称', '到期时间', '位置']) hrow.append(el('th', { text: h }));
+  t.append(el('thead', {}, hrow));
+  const tb = el('tbody');
+  const tr = el('tr');
+  const worst = worstExpire(it);
+  tr.append(
+    td(it.name),
+    td(worst?.expiresOn ?? it.expiresOn ?? '长期', 'mono'),
+    td(it.container ?? '—', 'muted'),
+  );
+  tb.append(tr);
+  t.append(tb);
+  body.append(tableWrap(t));
+
+  body.append(
+    el('p', {
+      class: 'muted small',
+      text: '这条记录的出入库流水会一并删除。这一步不可撤销。',
+    }),
+  );
+
+  openModal({
+    title: `删除「${it.name}」？`,
+    body,
+    actions: [
+      {
+        label: '删除',
+        kind: 'danger',
+        onClick: async () => {
+          try {
+            await window.api.item.delete(state.wsId, it.uuid);
+            toast(`已删除「${it.name}」`);
+            $('#modal-root').classList.add('hidden');
+            await reloadAll();
+          } catch (err) {
+            fail(err);
+          }
+        },
+      },
+    ],
+  });
 }
 
 /**
@@ -2333,20 +2439,125 @@ function itemCols(): ItemCol[] {
         return cell;
       },
     },
-    { key: 'purchased', head: '购买', cell: (it) => td(it.purchased_on ?? '', 'muted mono') },
-    {
-      key: 'location',
-      head: '位置',
-      cell: (it) => td(it.container ?? '', 'muted'),
-    },
+    { key: 'purchased', head: '入库', cell: (it) => td(it.purchased_on ?? '', 'muted mono') },
     { key: 'spec', head: '规格', cell: (it) => td(it.spec ?? '', 'muted') },
     { key: 'notes', head: '备注', cell: (it) => td(it.notes ?? '', 'muted wrap') },
   ];
 }
 
+/**
+ * 垃圾桶图标按钮。
+ *
+ * 用 SVG 而不是 emoji：emoji 在不同系统上长得不一样，而且会带上颜色，
+ * 在这套纯黑界面里很跳。**一个图标就够了**，不放文字 ——
+ * 边上已经有「编辑」「消耗」，再加一个"删除"两个字会让操作列挤成一团。
+ * 语义靠 title 补足（悬停能看全）。
+ */
+function trashButton(title: string, small = true): HTMLElement {
+  const btn = el('button', {
+    class: `icon-btn danger-text${small ? ' small' : ''}`,
+    type: 'button',
+  });
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+  btn.innerHTML =
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+    '<path d="M6 2h4M2.5 4.5h11M4 4.5l.7 9a1 1 0 0 0 1 .9h4.6a1 1 0 0 0 1-.9l.7-9"' +
+    ' fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '<path d="M6.6 7v4.6M9.4 7v4.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>' +
+    '</svg>';
+  return btn;
+}
+
+/** 退出批量模式：按钮状态与勾选一起清掉，别留下半截状态 */
+function exitBatchMode(): void {
+  state.batchMode = false;
+  state.batchSelected.clear();
+}
+
+/**
+ * 批量删除：先给用户看清单，再删。
+ *
+ * 删除不可撤销，所以**必须**有这一步。清单只列前 20 条 ——
+ * 勾 300 条时把 300 行塞进弹窗，用户只会看都不看直接点确认，
+ * 那这个确认框就白做了。给数量 + 前几条 + "还有 N 条"，
+ * 人反而会真的读一遍。
+ */
+function confirmBatchDelete(): void {
+  const uuids = [...state.batchSelected];
+  if (uuids.length === 0) return;
+
+  const byUuid = new Map(state.items.map((i) => [i.uuid, i]));
+  const named = uuids.map((u) => byUuid.get(u)).filter((x): x is ItemRow => Boolean(x));
+  const preview = named.slice(0, 20);
+
+  const body = el('div');
+  body.append(
+    el('p', {
+      text: `将删除 ${uuids.length} 条物品记录。每条的出入库流水会一并删除，这一步不可撤销。`,
+    }),
+  );
+
+  const t = el('table');
+  const hrow = el('tr');
+  for (const h of ['名称', '分类', '位置']) hrow.append(el('th', { text: h }));
+  t.append(el('thead', {}, hrow));
+  const tb = el('tbody');
+  for (const it of preview) {
+    const tr = el('tr');
+    tr.append(
+      td(it.name),
+      td(enumLabel('item_category', it.category) || '未分类', 'muted'),
+      td(it.container ?? '—', 'muted'),
+    );
+    tb.append(tr);
+  }
+  t.append(tb);
+  body.append(tableWrap(t));
+
+  if (named.length < uuids.length) {
+    body.append(
+      el('p', {
+        class: 'muted small',
+        text: `另有 ${uuids.length - named.length} 条不在当前列表里（可能已被筛选或已删除）。`,
+      }),
+    );
+  }
+  if (uuids.length > preview.length) {
+    body.append(el('p', { class: 'muted small', text: `上面只列了前 ${preview.length} 条。` }));
+  }
+
+  openModal({
+    title: `删除选中的 ${uuids.length} 条？`,
+    wide: true,
+    body,
+    actions: [
+      {
+        label: `删除 ${uuids.length} 条`,
+        kind: 'danger',
+        onClick: async () => {
+          try {
+            const res = await window.api.item.deleteMany(state.wsId, uuids);
+            // 已被别处删掉的条目会算进 missing，说清楚免得用户以为出错了
+            toast(
+              res.missing > 0
+                ? `已删除 ${res.deleted} 条（${res.missing} 条此前已不在）`
+                : `已删除 ${res.deleted} 条`,
+            );
+            exitBatchMode();
+            $('#modal-root').classList.add('hidden');
+            await reloadAll();
+          } catch (err) {
+            fail(err);
+          }
+        },
+      },
+    ],
+  });
+}
+
 /** 按配置取列定义。`keys` 来自 core，已经保证锁定列在里面 */
-function visibleItemCols(keys: string[] | undefined): ItemCol[] {
-  const all = itemCols();
+function visibleItemCols(keys: string[] | undefined): ItemCol[] {  const all = itemCols();
   if (!keys || keys.length === 0) return all;
   const wanted = new Set(keys);
   const picked = all.filter((c) => wanted.has(c.key));
@@ -2607,6 +2818,64 @@ function renderItems(view: HTMLElement): void {
 
   bar.append(briefViewToggle());
 
+  /*
+   * 批量删除。
+   *
+   * 两步走：先点「批量删除」进入选择模式（每行前面冒出复选框），
+   * 勾完再点一次（这时按钮已经变成「删除选中 (N)」）才真的删。
+   *
+   * 为什么不常驻复选框：常驻的话误点一下就直接进了删除流程；
+   * 而删除不可撤销。让它需要"有意进入"这一步，代价很小。
+   */
+  const batchBtn = el('button', {
+    class: state.batchMode ? 'danger' : 'ghost',
+    text: state.batchMode
+      ? state.batchSelected.size > 0
+        ? `删除选中 (${state.batchSelected.size})`
+        : '删除选中'
+      : '批量删除',
+  });
+
+  if (!state.batchMode) {
+    batchBtn.title = '进入选择模式，勾选多条后一起删除';
+    batchBtn.addEventListener('click', () => {
+      state.batchMode = true;
+      state.batchSelected.clear();
+      render();
+    });
+  } else {
+    batchBtn.disabled = state.batchSelected.size === 0;
+    batchBtn.title =
+      state.batchSelected.size === 0 ? '先勾选要删除的物品' : `删除勾选的 ${state.batchSelected.size} 条`;
+    batchBtn.addEventListener('click', () => confirmBatchDelete());
+  }
+  bar.append(batchBtn);
+
+  if (state.batchMode) {
+    const done = el('button', { class: 'ghost', text: '完成' });
+    done.title = '退出选择模式，不改动任何数据';
+    done.addEventListener('click', () => {
+      exitBatchMode();
+      render();
+    });
+    bar.append(done);
+
+    const all = el('button', { class: 'ghost small', text: '全选' });
+    all.title = '勾选当前列表里的全部物品（受搜索与分类筛选影响）';
+    all.addEventListener('click', () => {
+      for (const it of state.briefView ? filterBrief(state.items) : state.items) {
+        state.batchSelected.add(it.uuid);
+      }
+      render();
+    });
+    const none = el('button', { class: 'ghost small', text: '全不选' });
+    none.addEventListener('click', () => {
+      state.batchSelected.clear();
+      render();
+    });
+    bar.append(all, none);
+  }
+
   const addBtn = el('button', { class: 'primary', text: '＋ 新增物品' });
   addBtn.addEventListener('click', () => openItemForm(null));
   bar.append(addBtn);
@@ -2622,7 +2891,23 @@ function renderItems(view: HTMLElement): void {
 
   const t = el('table', { class: 'items' });
   const head = el('tr');
-  head.append(el('th', { class: 'col-extra', text: '' })); // 展开箭头
+  if (state.batchMode) {
+    // 表头这个复选框只管"全选/全不选"，不表示任何一条的状态
+    const allBox = el('input', { type: 'checkbox', class: 'batch-box' }) as HTMLInputElement;
+    const shownForAll = state.briefView ? filterBrief(state.items) : state.items;
+    allBox.checked = shownForAll.length > 0 && shownForAll.every((i) => state.batchSelected.has(i.uuid));
+    allBox.indeterminate =
+      !allBox.checked && shownForAll.some((i) => state.batchSelected.has(i.uuid));
+    allBox.title = allBox.checked ? '全不选' : '全选当前列表';
+    allBox.addEventListener('change', () => {
+      if (allBox.checked) for (const i of shownForAll) state.batchSelected.add(i.uuid);
+      else state.batchSelected.clear();
+      render();
+    });
+    head.append(el('th', { class: 'col-batch' }, allBox));
+  } else {
+    head.append(el('th', { class: 'col-extra', text: '' })); // 展开箭头
+  }
   head.append(el('th', { class: 'col-dot', text: '' })); // 到期状态色点，固定列
   for (const c of cols) {
     head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
@@ -2654,7 +2939,25 @@ function renderItems(view: HTMLElement): void {
     if (!bulk && it.remaining <= 0) tr.classList.add('spent');
 
     // 展开区：默认不占地方，点开才显示
-    tr.append(el('td', { class: 'col-extra' }, extraToggle(it)));
+    if (state.batchMode) {
+      const checked = state.batchSelected.has(it.uuid);
+      const box = el('input', { type: 'checkbox', class: 'batch-box' }) as HTMLInputElement;
+      box.checked = checked;
+      box.title = checked ? `取消勾选「${it.name}」` : `勾选「${it.name}」`;
+      box.addEventListener('change', () => {
+        if (box.checked) state.batchSelected.add(it.uuid);
+        else state.batchSelected.delete(it.uuid);
+        /*
+         * 重画整张表，否则表头那个"全选"的选中/半选状态不会跟着变 ——
+         * 它是在表头画的时候算一次的。只改这一格会留下一个说谎的表头。
+         */
+        render();
+      });
+      tr.append(el('td', { class: 'col-batch' }, box));
+      if (checked) tr.classList.add('batch-on');
+    } else {
+      tr.append(el('td', { class: 'col-extra' }, extraToggle(it)));
+    }
 
     // 第一列：到期状态色点，一眼扫出哪些要处理
     const worst = worstExpire(it);
@@ -3794,6 +4097,9 @@ async function switchWorkspace(id: string): Promise<void> {
     await window.api.ws.use(id);
     state.wsId = id;
     state.filter = { search: '', category: '' };
+    // 换工作区必须清空勾选：留着上一个库的 uuid 去删这个库的东西，
+    // 用户会以为自己删的是眼前这些
+    exitBatchMode();
     await reloadAll();
   } catch (err) {
     fail(err);

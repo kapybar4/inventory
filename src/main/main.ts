@@ -1249,6 +1249,36 @@ function registerHandlers(): void {
     });
   });
 
+  /**
+   * 一次删多条。
+   *
+   * 界面上有两个地方要批量删（概览页逐条快速删除、物品页勾选后批量删除），
+   * 都走这一个入口。**在一个事务里做完** —— 中途失败要么全成要么全不成，
+   * 不能出现"删了一半、报了个错、用户不知道哪几条没了"。
+   *
+   * 找不到的 uuid **跳过而不是抛错**：界面上的清单可能是几秒前拉的，
+   * 期间另一处已经删掉了一条（比如概览页刚点过垃圾桶）。
+   * 为此报错会让"删 10 条、其中 1 条已不在"变成一件办不成的事。
+   */
+  handle('item:deleteMany', (wsId, uuids) => {
+    if (!Array.isArray(uuids)) throw new Error('item:deleteMany 需要一个 uuid 数组');
+    const list = uuids.map((u) => asString(u, 'uuid'));
+    if (list.length === 0) throw new Error('item:deleteMany 至少要给一个 uuid');
+    if (list.length > 2000) throw new Error('一次最多删 2000 条');
+
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const removed: string[] = [];
+      const missing: string[] = [];
+      transaction(db, () => {
+        for (const u of list) {
+          if (deleteRow(db, 'items', u)) removed.push(u);
+          else missing.push(u);
+        }
+      });
+      return { deleted: removed.length, missing: missing.length, removed, missingUuids: missing };
+    });
+  });
+
   // ── 到期概览（v3：按分类分组 + 组内按到期时间排序，不再分级）──
   handle('alert:summary', (wsId) => {
     const dd = dataDir();
