@@ -142,6 +142,15 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   界面内容再黑，标题栏也是一条浅灰色，像两个程序拼在一起。
   **别改成自绘标题栏**（`titleBarStyle: 'hidden'`）：顶栏没给窗口按钮留位置
   （导航右边界距窗口右边只有 16px），会把按钮压在内容上。
+- **数据目录只有一个答案：`core/workspace.ts` 的 `defaultDataDir()`。**
+  界面和命令行都必须调它，**不要自己拼**。曾经界面写的是
+  `join(app.getPath('userData'), 'inventory')`，而 userData 会被
+  `--user-data-dir` 改掉 —— 于是同一个应用有了两套数据路径：
+  命令行看 `%LOCALAPPDATA%\dsh-inventory`，界面翻 profile 下的 `inventory\`。
+  表现是"命令行有数据，界面一片空白"，而且**两边都不报错**，只能靠人比对路径。
+  数据落在哪和 Chromium profile 落在哪是两件事，不该互相牵动。
+  界面启动时若发现数据目录里没有 registry.json，会往 stderr 打一条提示，
+  就是为了让这类"沉默的空白"至少留下一句话。
 - **应用显示名（`APP_NAME`）与机器标识是两回事**。显示名可以改（现在叫 `Inventory`），
   但 `APP_FORMAT` / `REGISTRY_FORMAT` / 数据目录名里那些 `dsh-inventory-*`
   **一个字符都不能动**：改了老归档读不回来、老数据目录也找不到。

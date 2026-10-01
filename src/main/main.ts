@@ -114,11 +114,24 @@ function useLocalUserData(): void {
 
 useLocalUserData();
 
-/** 数据根目录：测试可用 DSH_INVENTORY_HOME 覆盖 */
+/**
+ * 数据根目录。
+ *
+ * **委托给 core 的 `defaultDataDir()`，不要自己拼。**
+ *
+ * 当初这里写的是 `join(app.getPath('userData'), 'inventory')`，而 userData
+ * 会被 `--user-data-dir` 改掉 —— 于是同一个应用有了两套数据路径：
+ * 命令行看到的是 `%LOCALAPPDATA%\dsh-inventory`，界面却去翻 profile 目录下的
+ * `inventory\`，那里什么都没有。表现就是"命令行有数据，界面上空空如也"，
+ * 而且两处都"没报错"，只能靠人比对路径才发现。
+ *
+ * 数据落在哪，跟 Chromium 的 profile 落在哪，是**两件事**，不该互相牵动。
+ * 现在两边（`main.ts` 与 `cli/main.ts`）都调同一个函数，只有一个答案。
+ *
+ * 优先级：`DSH_INVENTORY_HOME` → `%LOCALAPPDATA%\dsh-inventory` → `~/.dsh-inventory`
+ */
 function dataDir(): string {
-  const env = process.env['DSH_INVENTORY_HOME'];
-  if (env && env.trim()) return env.trim();
-  return join(app.getPath('userData'), 'inventory');
+  return defaultDataDir();
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -1492,6 +1505,41 @@ function findItemByUuid(db: ReturnType<typeof openDatabase>, uuid: string): Row 
 // 启动
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * 数据目录看起来不对劲就在 stderr 上说一声。
+ *
+ * 这个检查是为了防一类**不报错**的故障：数据明明在，界面却一片空白，
+ * 而且没有任何提示。曾经真的发生过 —— 界面按 `userData` 找数据、
+ * 命令行按 `%LOCALAPPDATA%` 找，同一个应用两套路径，
+ * 传个 `--user-data-dir` 就能让两边分家。
+ *
+ * 只警告，不擅自创建或迁移：数据目录里是别人的家当，宁可什么都不做。
+ */
+function warnIfDataDirLooksWrong(): void {
+  const dir = dataDir();
+  const exists = existsSync(dir);
+  const hasRegistry = existsSync(join(dir, 'registry.json'));
+  if (hasRegistry) return;
+
+  const env = process.env['DSH_INVENTORY_HOME'];
+  const hint = env?.trim()
+    ? `（来自环境变量 DSH_INVENTORY_HOME）`
+    : '（默认位置：%LOCALAPPDATA%\\dsh-inventory）';
+
+  process.stderr.write(
+    [
+      '',
+      '提示：这个数据目录里还没有任何工作区。',
+      `  目录：${dir} ${hint}`,
+      exists ? '  目录存在，但没有 registry.json。' : '  目录不存在。',
+      '如果命令行能看到数据、界面却看不到，多半是两边指向了不同目录：',
+      '  用 `dsh-inv info` 看命令行用的是哪个目录，',
+      '  或设 DSH_INVENTORY_HOME 指定同一个目录后重启界面。',
+      '',
+    ].join('\n'),
+  );
+}
+
 // 同一时间只允许一个实例：两个进程同时写同一个 SQLite 虽然安全（WAL），
 // 但用户会看到两个窗口在互相刷新，体验很差
 if (!app.requestSingleInstanceLock()) {
@@ -1517,6 +1565,8 @@ if (!app.requestSingleInstanceLock()) {
      * 所以不需要再判断系统偏好。
      */
     nativeTheme.themeSource = 'dark';
+
+    warnIfDataDirLooksWrong();
 
     registerHandlers();
     createWindow();
