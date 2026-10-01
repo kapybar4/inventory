@@ -74,8 +74,133 @@ import {
   SORT_FIELDS,
   uncategorizedCount,
 } from '../core/ordering';
+import {
+  COLUMN_KEYS,
+  DEFAULT_COLUMNS,
+  ITEM_COLUMNS,
+  LOCKED_COLUMNS,
+  columnDef,
+  isColumnKey,
+  isMinimal,
+  resolveColumns,
+} from '../core/columns';
 import { updateWorkspacePrefs } from '../core/workspace';
 import { exportTableColumns } from './_helpers';
+
+// ═════════════════════════════════════════════════════════════
+// 列配置
+// ═════════════════════════════════════════════════════════════
+
+test('列配置：物品与到期时间不可关闭', () => {
+  assert.deepEqual(LOCKED_COLUMNS, ['name', 'expiry'], '锁定列就是这两个');
+  assert.ok(columnDef('name').lock, '物品列 lock');
+  assert.ok(columnDef('expiry').lock, '到期时间列 lock');
+});
+
+test('列配置：锁定列在被删掉时会被补回来', () => {
+  // 用户把能关的都关了 —— 结果里仍然有物品与到期时间
+  const onlyOptional = COLUMN_KEYS.filter((k) => !LOCKED_COLUMNS.includes(k));
+  const resolved = resolveColumns(onlyOptional);
+  for (const key of LOCKED_COLUMNS) {
+    assert.ok(resolved.includes(key), `${key} 必须被补回来`);
+  }
+  assert.equal(resolved.length, LOCKED_COLUMNS.length + onlyOptional.length);
+});
+
+test('列配置：空数组 / 非法值回落到默认列', () => {
+  assert.deepEqual(resolveColumns([]), DEFAULT_COLUMNS, '空数组 = 没配置过');
+  assert.deepEqual(resolveColumns(null), DEFAULT_COLUMNS, 'null');
+  assert.deepEqual(resolveColumns(undefined), DEFAULT_COLUMNS, 'undefined');
+  assert.deepEqual(resolveColumns('name,expiry'), DEFAULT_COLUMNS, '不是数组');
+  assert.deepEqual(resolveColumns([1, 2, 3]), DEFAULT_COLUMNS, '认不出的键');
+});
+
+test('列配置：认不出的键被丢掉，重复被去重', () => {
+  const resolved = resolveColumns(['brand', '不存在', 'brand', 'model']);
+  assert.ok(resolved.includes('brand') && resolved.includes('model'));
+  assert.ok(!(resolved as string[]).includes('不存在'));
+  assert.equal(new Set(resolved).size, resolved.length, '不该有重复');
+  // 顺序按定义走，不随传入顺序变
+  assert.deepEqual(resolved, ['name', 'expiry', 'brand', 'model']);
+});
+
+test('列配置：输出顺序稳定，不随勾选先后变', () => {
+  const a = resolveColumns(['purchased', 'brand', 'quantity']);
+  const b = resolveColumns(['quantity', 'brand', 'purchased']);
+  assert.deepEqual(a, b, '同一组列，不管按什么顺序传，结果应一致');
+  // 而且应等于定义里的相对顺序
+  const defOrder = ITEM_COLUMNS.map((c) => c.key);
+  const positions = a.map((k) => defOrder.indexOf(k));
+  assert.deepEqual(positions, [...positions].sort((x, y) => x - y), '应按定义顺序');
+});
+
+test('列配置：只剩锁定列时算「最小」', () => {
+  assert.equal(isMinimal(['name', 'expiry']), true);
+  assert.equal(isMinimal(['name']), true, '少给一个也是最小（会被补回来）');
+  assert.equal(isMinimal(['name', 'expiry', 'brand']), false);
+  assert.equal(isMinimal(null), false, '没配过是默认全开，不是最小');
+});
+
+test('列配置：按工作区各存各的，且写进去的一定是解析后的结果', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const a = createWorkspace(dataDir, { name: '甲', id: 'ws_col_a' });
+    createWorkspace(dataDir, { name: '乙', id: 'ws_col_b' });
+
+    // 甲只留三列，还故意漏掉锁定列
+    updateWorkspacePrefs(dataDir, a.entry.id, { columns: ['quantity'] });
+    // 乙不动
+
+    const entryA = requireWorkspace(dataDir, 'ws_col_a');
+    const entryB = requireWorkspace(dataDir, 'ws_col_b');
+    assert.deepEqual(resolveColumns(entryA.columns), ['name', 'expiry', 'quantity'], '锁定列补上了');
+    assert.deepEqual(resolveColumns(entryB.columns), DEFAULT_COLUMNS, '乙不受影响');
+
+    // 存进去的时候就该是解析后的，不留半成品
+    assert.deepEqual(entryA.columns, ['name', 'expiry', 'quantity']);
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('列配置：isColumnKey 挡住拼错的键', () => {
+  assert.equal(isColumnKey('expiry'), true);
+  assert.equal(isColumnKey('expires'), false, '差一个字母要挡住');
+  assert.equal(isColumnKey(''), false);
+  assert.equal(isColumnKey(null), false);
+  assert.equal(isColumnKey(7), false);
+});
+
+test('列配置：不影响导出包（它是界面偏好，不是物品数据）', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const ws = createWorkspace(dataDir, { name: '源', id: 'ws_col_exp' });
+    const db = openDatabase(workspaceDbPath(dataDir, ws.entry));
+    try {
+      insertRow(db, 'items', { code: 'X-1', name: '一件东西', category: 'daily' });
+    } finally {
+      db.close();
+    }
+    updateWorkspacePrefs(dataDir, 'ws_col_exp', { columns: ['name', 'expiry'] });
+
+    const archive = join(root, 'col.zip');
+    exportWorkspace(dataDir, ws.entry, { outPath: archive });
+    const result = importArchive(archive, { dataDir, name: '副本', id: 'ws_col_copy' });
+    assert.equal(result.ok, true);
+
+    // 归档里不该有列配置的痕迹
+    const exported = exportTableColumns('items');
+    assert.ok(!exported.includes('columns'), 'items 的导出列里不该有 columns');
+
+    // 副本拿默认列，不继承源工作区的界面偏好
+    const copy = requireWorkspace(dataDir, 'ws_col_copy');
+    assert.deepEqual(resolveColumns(copy.columns), DEFAULT_COLUMNS);
+  } finally {
+    removeTempRoot(root);
+  }
+});
 
 // ═════════════════════════════════════════════════════════════
 // 功能测试这一轮抓到的 bug，逐条固化成回归测试。

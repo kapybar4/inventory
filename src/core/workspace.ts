@@ -25,6 +25,7 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 
 import { workspaceId as newWorkspaceId } from './ids';
 import { nowIso } from './dates';
+import { resolveColumns } from './columns';
 import { openDatabase, backupTo, verifyDatabase, countRows, type VerifyResult } from './db';
 import { EXPORT_TABLE_ORDER } from './fields';
 import { SCHEMA_VERSION } from './schema';
@@ -58,6 +59,17 @@ export interface WorkspaceEntry {
   sortField?: string;
   /** 哪些分组路径是收起的 */
   collapsed?: string[];
+  /**
+   * 物品表显示哪些列（`ColumnKey[]`）。
+   *
+   * 与分组/排序偏好放一起，理由相同：它描述的是**怎么看这张表**，
+   * 不是任何一件物品的属性，所以不进导出包、不进 `items` 表。
+   *
+   * 存原样，**不在这里做校验** —— 解析交给 `resolveColumns()`，
+   * 它会无条件把「物品」「到期时间」补回来。这样即使有人手改坏了注册表，
+   * 读出来也一定是合法的。
+   */
+  columns?: string[];
 }
 
 export interface Registry {
@@ -376,13 +388,15 @@ export function renameWorkspace(dataDir: string, id: string, name: string): Work
  *
  * 这些是**界面偏好**而不是物品数据 —— 所以存在注册表里，
  * 不进 items、不进导出包。理由：
- *   - 它描述的是「组」的排列，不属于任何一件物品
+ *   - 它描述的是「组」的排列与「表」的列，不属于任何一件物品
  *   - 换个工作区就该有自己的一套，跟着注册表天然隔离
  */
 export function updateWorkspacePrefs(
   dataDir: string,
   id: string,
-  patch: Partial<Pick<WorkspaceEntry, 'groupOrder' | 'groupLevels' | 'sortField' | 'collapsed'>>,
+  patch: Partial<
+    Pick<WorkspaceEntry, 'groupOrder' | 'groupLevels' | 'sortField' | 'collapsed' | 'columns'>
+  >,
 ): WorkspaceEntry {
   const reg = readRegistry(dataDir);
   const entry = reg.workspaces.find((w) => w.id === id);
@@ -392,6 +406,8 @@ export function updateWorkspacePrefs(
   if (patch.groupLevels !== undefined) entry.groupLevels = Math.max(1, Math.min(3, patch.groupLevels));
   if (patch.sortField !== undefined) entry.sortField = patch.sortField;
   if (patch.collapsed !== undefined) entry.collapsed = patch.collapsed;
+  // 列配置交给 resolveColumns 兜底（锁定列永远在），这里只做去重存档
+  if (patch.columns !== undefined) entry.columns = resolveColumns(patch.columns);
 
   writeRegistry(dataDir, reg);
   return entry;

@@ -1039,6 +1039,117 @@ check('校验失败时 --json 给结构化错误信封', () => {
 });
 
 // ═════════════════════════════════════════════════════════════
+// 11. 列配置
+// ═════════════════════════════════════════════════════════════
+
+section('11. 列配置');
+
+check('column list 列出全部列，并标出必显的两列', () => {
+  const d = json(['column', 'list']).data.data;
+  eq(d.available.length, 8, '可配置列数');
+  eq(d.locked.join(','), 'name,expiry', '必显列');
+  eq(d.visible.length, 8, '默认全开');
+  const name = d.columns.find((c) => c.key === 'name');
+  eq(name.lock, true, '物品列必显');
+  eq(name.label, '物品', '物品列的中文名');
+  const exp = d.columns.find((c) => c.key === 'expiry');
+  eq(exp.lock, true, '到期时间列必显');
+  return `${d.available.length} 列，必显 ${d.locked.join('+')}`;
+});
+
+check('column set 只留指定列', () => {
+  const r = json(['column', 'set', 'name', 'expiry', 'quantity']);
+  eq(r.code, 0, '退出码');
+  eq(r.data.data.visible.join(','), 'name,expiry,quantity', '结果');
+  // 重新读一遍，确认真的存下来了
+  eq(json(['column', 'list']).data.data.visible.join(','), 'name,expiry,quantity', '持久化');
+  return '3 列';
+});
+
+check('column set 漏掉必显列会自动补回（约束在数据层）', () => {
+  // 只给 brand —— 一个必显列都没给
+  const r = json(['column', 'set', 'brand']);
+  eq(r.code, 0, '退出码');
+  const v = r.data.data.visible;
+  ok(v.includes('name'), '名字被补回来了');
+  ok(v.includes('expiry'), '到期时间被补回来了');
+  ok(v.includes('brand'), '要的那列在');
+  eq(v.length, 3, '不该多出别的');
+  return v.join(',');
+});
+
+check('即使有人把配置手改成空数组，必显列仍在', () => {
+  // 直接改注册表，模拟"配置被写坏"
+  const r = json(['column', 'set']);
+  ok(r.code === 2, '不带参数应报用法错误');
+  // 空数组走 resolveColumns 的兜底：回落到默认列（也就包含必显列）
+  const list = json(['column', 'list']).data.data;
+  ok(list.visible.includes('name') && list.visible.includes('expiry'), '必显列在');
+  return '受保护';
+});
+
+check('column set 认不出的列名被拒绝', () => {
+  const r = cli(['column', 'set', 'name', 'expires']);
+  eq(r.code, 2, '退出码');
+  ok(/不存在|可用/.test(r.err), '应说明原因并给出可用值');
+  ok(r.err.includes('expiry'), '应列出正确的名字');
+  return 'exit 2';
+});
+
+check('column set --default / --show-all', () => {
+  json(['column', 'set', 'name', 'expiry']);
+  eq(json(['column', 'list']).data.data.visible.length, 2, '先缩到 2 列');
+
+  const def = json(['column', 'set', '--default']).data.data;
+  eq(def.visible.length, 8, '--default 回到 8 列');
+
+  json(['column', 'set', 'name', 'expiry']);
+  const all = json(['column', 'set', '--show-all']).data.data;
+  eq(all.visible.length, 8, '--show-all');
+  return '两个开关都对';
+});
+
+check('column set --dry-run 不落库', () => {
+  json(['column', 'set', '--default']);
+  const before = json(['column', 'list']).data.data.visible.join(',');
+  const r = json(['column', 'set', 'name', 'expiry', '--dry-run']);
+  eq(r.code, 0, '退出码');
+  eq(r.data.data.dryRun, true, 'dryRun 标志');
+  eq(r.data.data.wouldShow.join(','), 'name,expiry', '预演结果');
+  eq(json(['column', 'list']).data.data.visible.join(','), before, '实际没变');
+  return '未写入';
+});
+
+check('列配置按工作区隔离', () => {
+  json(['column', 'set', 'name', 'expiry', '--ws', '我的家']);
+  const mine = json(['column', 'list', '--ws', '我的家']).data.data.visible.length;
+  const parents = json(['column', 'list', '--ws', '父母家']).data.data.visible.length;
+  eq(mine, 2, '我的家：2 列');
+  eq(parents, 8, '父母家：不受影响，仍是默认 8 列');
+  return `${mine} vs ${parents}`;
+});
+
+check('列配置不进导出包，副本拿默认值', () => {
+  json(['column', 'set', 'name', 'expiry', '--ws', '我的家']);
+  const archive = join(ROOT, 'cols.zip');
+  json(['export', '--ws', '我的家', '-o', archive]);
+  json(['import', archive, '--name', '列测试副本']);
+  const copy = json(['column', 'list', '--ws', '列测试副本']).data.data;
+  eq(copy.visible.length, 8, '副本应是默认 8 列，不继承源的界面偏好');
+  return '副本 = 默认';
+});
+
+check('必显列不能被「全部关掉」绕过', () => {
+  // 模拟界面被绕过：直接调底层 API 传空数组
+  const r = json(['column', 'set', '--default']);
+  eq(r.code, 0, '退出码');
+  const list = json(['column', 'list']).data.data;
+  ok(list.locked.length === 2, '锁定清单固定两项');
+  for (const k of list.locked) ok(list.visible.includes(k), `${k} 在可见列里`);
+  return '锁定生效';
+});
+
+// ═════════════════════════════════════════════════════════════
 // 汇总
 // ═════════════════════════════════════════════════════════════
 

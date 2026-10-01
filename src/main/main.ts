@@ -51,6 +51,13 @@ import {
   type SortField,
 } from '../core/ordering';
 import {
+  DEFAULT_COLUMNS,
+  ITEM_COLUMNS,
+  LOCKED_COLUMNS,
+  isMinimal,
+  resolveColumns,
+} from '../core/columns';
+import {
   addStock,
   removeStock,
   stocksOf,
@@ -108,6 +115,58 @@ function createWindow(): void {
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
+
+  // 窗口重新获得焦点时查一次日期 —— 电脑睡了一夜再唤醒，setTimeout 可能被推迟，
+  // 靠这一个检查兜住「跨天了但定时器还没响」的空档
+  mainWindow.on('focus', () => checkDateRollover());
+}
+
+// ─────────────────────────────────────────────────────────────
+// 跨天刷新
+//
+// 「剩余时间」是算出来的（到期日 − 今天），不是存下来的。所以它在页面上
+// **会自己过期**：开着应用过一夜，昨天写的"剩 7 个月"今天就错了。
+//
+// 刷新时机（需求里点名了三个，这里都覆盖）：
+//   1. **零点** —— 精确定时到下一个零点，响过之后再排下一次
+//   2. **打开程序** —— 渲染层首屏本来就会重算，不需要额外做什么
+//   3. **改了到期时间** —— 走既有的 reloadAll() 路径
+//
+// 另外加一道兜底：窗口获得焦点时比对日期。定时器在系统睡眠期间不保证准时，
+// 只靠它会出现"醒了但没刷新"。
+// ─────────────────────────────────────────────────────────────
+
+/** 上次广播时的日期（YYYY-MM-DD），用来判断是不是真跨天了 */
+let lastSeenDay = today();
+
+/** 若有需要，广播一次「跨天了」 */
+function checkDateRollover(): void {
+  const now = today();
+  if (now === lastSeenDay) return;
+  lastSeenDay = now;
+  for (const w of BrowserWindow.getAllWindows()) {
+    w.webContents.send('date:changed');
+  }
+}
+
+/**
+ * 排到下一个零点之后一秒再触发。
+ *
+ * 用「距离下个零点的毫秒数」而不是固定 24 小时轮询：
+ * 后者会在夏令时切换、系统改时间之后越漂越远。
+ * 每次响完重新算一次，永远贴着真实的零点。
+ */
+function scheduleMidnightTick(): void {
+  const now = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 1, 0);
+  const delay = Math.max(1000, next.getTime() - now.getTime());
+
+  const timer = setTimeout(() => {
+    checkDateRollover();
+    scheduleMidnightTick();
+  }, delay);
+  // 这个定时器不该拖住进程退出
+  timer.unref?.();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -673,8 +732,43 @@ function registerHandlers(): void {
         uncategorized: uncategorizedCount(rows),
         groups: tree.nodes.map(decorateNode),
         collapsed: entry.collapsed ?? [],
+        // 顺带把列配置带回去：界面首屏就能按用户的选择画表，不用再往返一次
+        columns: resolveColumns(entry.columns),
       };
     });
+  });
+
+  /**
+   * 列配置：读。
+   *
+   * 返回 `available` 让界面能画出勾选框（含 `lock` 标记），
+   * `visible` 是解析后的结果 —— 锁定列一定在里面。
+   */
+  handle('column:get', (wsId) => {
+    const entry = wsId ? requireWorkspace(dataDir(), asString(wsId, 'wsId')) : resolveWorkspace(dataDir(), null);
+    return {
+      available: ITEM_COLUMNS,
+      locked: LOCKED_COLUMNS,
+      visible: resolveColumns(entry.columns),
+      defaults: DEFAULT_COLUMNS,
+      minimal: isMinimal(entry.columns),
+    };
+  });
+
+  /**
+   * 列配置：写。
+   *
+   * 传进来的清单可以是任意内容（含空的），`resolveColumns` 会把
+   * 「物品」「到期时间」补回来 —— **约束在数据层**，界面就算被绕过了也改不坏。
+   */
+  handle('column:set', (wsId, visible) => {
+    if (!Array.isArray(visible)) throw new Error('column:set 需要一个数组');
+    const entry = wsId ? requireWorkspace(dataDir(), asString(wsId, 'wsId')) : resolveWorkspace(dataDir(), null);
+    const saved = updateWorkspacePrefs(dataDir(), entry.id, { columns: visible as string[] });
+    return {
+      visible: resolveColumns(saved.columns),
+      minimal: isMinimal(saved.columns),
+    };
   });
 
   /**
@@ -1154,6 +1248,8 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(null);
     registerHandlers();
     createWindow();
+    // 起点：排到下一个零点，之后每次响完再排下一次
+    scheduleMidnightTick();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();

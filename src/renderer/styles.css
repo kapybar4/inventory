@@ -1927,6 +1927,92 @@ tbody tr.selected .ops {
   min-width: auto;
 }
 
+/* ── 列设置 ──
+   锁定列要一眼看出"不能动"，并且给出理由 —— 灰掉一个框不解释等于没解释 */
+.col-config p {
+  margin: 0 0 14px;
+  line-height: 1.6;
+}
+
+.col-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.col-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.col-row:hover {
+  background: var(--bg-raised);
+  border-color: var(--line);
+}
+
+.col-row.locked {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.col-row.locked:hover {
+  background: transparent;
+  border-color: transparent;
+}
+
+.col-row input {
+  margin-top: 2px;
+  min-width: auto;
+}
+
+.col-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.col-lock {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-soft, rgba(90, 160, 255, 0.16));
+  color: var(--accent, #6aa8ff);
+}
+
+.col-hint {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--fg-faint);
+  line-height: 1.5;
+}
+
+.col-actions {
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line);
+}
+
+/* 到期时间列：日期与剩余时间上下排，省得占两列的宽度。
+   注意是内层 div 做 flex —— 直接在 td 上用 flex 会把表格布局搞坏 */
+.expiry-cell > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.expiry-left {
+  font-size: 11.5px;
+}
+
 .kv {
   display: grid;
   grid-template-columns: max-content 1fr;

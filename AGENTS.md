@@ -89,6 +89,15 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   一碰，"关掉排序就回到原来顺序"这个承诺就废了。
 - **`updateRow` 里 `null` = 显式清空，`undefined` = 不动这一列**。
   写成"null 就是不修改"会让「设为长期」「关闭批量」静默失效。
+- **「物品」与「到期时间」两列不可关闭**。约束在 `core/columns.ts` 的
+  `resolveColumns()` 里：不管传进来什么（空数组、乱写的键、漏掉锁定列），
+  输出里这两列永远在。**不要把这个检查挪到界面层** ——
+  界面被绕过（手改注册表、以后加个"全不选"按钮）就失效了。
+  这跟"未分类永远置顶"是同一类做法：关键约束不寄希望于调用方自觉。
+- **「剩余时间」不是一列，是算出来的**（`到期日 − 今天`）。所以：
+  不要给它加独立的开关（会出现"开着剩余时间却关掉到期日"这种说不通的状态）；
+  也不要把它存进库里 —— 存下来的相对时间第二天就是错的。
+  刷新靠 `main.ts` 的零点定时广播 + 渲染层的焦点检查（另加 60 秒自检）。
 
 ---
 
@@ -113,9 +122,9 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 58 项单元测试
-npm.cmd run test:func   # 89 项 CLI/数据层功能测试
-npm.cmd run test:gui    # 19 步桌面端走查（要开 Electron）
+npm.cmd test            # 67 项单元测试
+npm.cmd run test:func   # 99 项 CLI/数据层功能测试
+npm.cmd run test:gui    # 24 步桌面端走查（要开 Electron）
 npm.cmd run test:all    # 单元 + 功能
 ```
 
@@ -217,7 +226,7 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、CLI 89 项、单元 58 项、桌面端 19 步、往返不变式。
+**已验证**：核心功能、单元 67 项、CLI 99 项、桌面端 24 步、往返不变式。
 
 **没验证**：
 - **打包（`npm.cmd run dist:win`）从未跑通过。** electron-builder 已配好、

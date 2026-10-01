@@ -75,6 +75,14 @@ import {
   categoryLabel as categoryLabelOf,
   type SortField,
 } from '../core/ordering';
+import {
+  DEFAULT_COLUMNS,
+  ITEM_COLUMNS,
+  LOCKED_COLUMNS,
+  isColumnKey,
+  isMinimal,
+  resolveColumns,
+} from '../core/columns';
 import { applyItemOrder, nextItemCode } from '../core/db';
 import { formatDaysLeft, daysUntil, today, monthEnd } from '../core/dates';
 import { seedWorkspace } from '../core/seed';
@@ -2149,6 +2157,107 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
  * `group list` —— 按分类分组、组内按到期时间排序的完整清单。
  * 与 alert list 的区别：这个列出**全部**在用物品，不只是需要关注的。
  */
+/**
+ * `column list` —— 这张表有哪些列、现在开着哪些。
+ *
+ * 「物品」「到期时间」标成 required，让用命令行的人也知道关不掉。
+ */
+function cmdColumnList(args: ParsedArgs, dataDir: string): number {
+  const entry = resolveWorkspace(dataDir, str(args, 'ws'));
+  const visible = resolveColumns(entry.columns);
+
+  const rows = ITEM_COLUMNS.map((c) => ({
+    key: c.key,
+    label: c.label,
+    on: visible.includes(c.key),
+    lock: Boolean(c.lock),
+    hint: c.hint,
+  }));
+
+  if (out.json) {
+    emitJson({
+      workspaceId: entry.id,
+      workspaceName: entry.name,
+      available: ITEM_COLUMNS,
+      locked: LOCKED_COLUMNS,
+      visible,
+      defaults: DEFAULT_COLUMNS,
+      minimal: isMinimal(entry.columns),
+      columns: rows,
+    });
+    return EXIT.OK;
+  }
+
+  write(`${entry.name} —— 物品表显示 ${visible.length}/${ITEM_COLUMNS.length} 列`);
+  printTable(rows, [
+    { title: '', get: (r) => (r.on ? '✓' : '·'), max: 3 },
+    { title: 'key', get: (r) => r.key, max: 12 },
+    { title: '名称', get: (r) => r.label, max: 12 },
+    { title: '必显', get: (r) => (r.lock ? '是' : ''), max: 5 },
+    { title: '说明', get: (r) => r.hint, max: 46 },
+  ]);
+  write('\n「物品」与「到期时间」必须显示 —— 缺了前者不知道给谁到期，');
+  write('缺了后者这张表就退化成一个普通清单了。');
+  write('界面里也能改：物品页工具栏的「列设置」。');
+  return EXIT.OK;
+}
+
+/** `column set` —— 直接给列名，或 --default / --show-all */
+function cmdColumnSet(args: ParsedArgs, dataDir: string): number {
+  const entry = resolveWorkspace(dataDir, str(args, 'ws'));
+
+  let wanted: string[];
+  if (bool(args, 'default')) {
+    wanted = [...DEFAULT_COLUMNS];
+  } else if (bool(args, 'showAll')) {
+    wanted = ITEM_COLUMNS.map((c) => c.key);
+  } else {
+    const keys = args._;
+    if (keys.length === 0) {
+      throw new ArgError(
+        '用法: column set <列> [更多列...]\n' +
+          `可用列: ${ITEM_COLUMNS.map((c) => c.key).join(' / ')}\n` +
+          '或 column set --default / --show-all',
+      );
+    }
+    const bad = keys.filter((k) => !isColumnKey(k));
+    if (bad.length > 0) {
+      throw new ArgError(
+        `列 "${bad.join('、')}" 不存在。可用: ${ITEM_COLUMNS.map((c) => c.key).join(' / ')}`,
+      );
+    }
+    wanted = keys as string[];
+  }
+
+  // 交给 resolveColumns 兜底：锁定列会被补回来，认不出的会被丢掉
+  const resolved = resolveColumns(wanted);
+  const dropped = wanted.filter((k) => !(resolved as string[]).includes(k));
+
+  if (bool(args, 'dryRun')) {
+    if (out.json) emitJson({ dryRun: true, workspaceId: entry.id, wouldShow: resolved });
+    else {
+      write(`将把「${entry.name}」的物品表设为显示 ${resolved.length} 列：`);
+      write(`  ${resolved.join(', ')}`);
+    }
+    return EXIT.OK;
+  }
+
+  updateWorkspacePrefs(dataDir, entry.id, { columns: resolved });
+
+  if (out.json) {
+    emitJson({ workspaceId: entry.id, visible: resolved, minimal: isMinimal(resolved) });
+    return EXIT.OK;
+  }
+
+  write(`「${entry.name}」的物品表现在显示 ${resolved.length} 列：${resolved.join('、')}`);
+  const lockedAdded = LOCKED_COLUMNS.filter((k) => !wanted.includes(k));
+  if (lockedAdded.length > 0) {
+    write(`（${lockedAdded.join('、')} 是必显列，自动补上了）`);
+  }
+  if (dropped.length > 0) write(`（${dropped.join('、')} 认不出来，已忽略）`);
+  return EXIT.OK;
+}
+
 function cmdGroupList(args: ParsedArgs, dataDir: string): number {
   const entry = resolveWorkspace(dataDir, str(args, 'ws') ?? args._[0] ?? null);
   const db = openDatabase(workspaceDbPath(dataDir, entry), { readOnly: true });
@@ -2951,6 +3060,25 @@ const COMMANDS: Command[] = [
       }
       return EXIT.OK;
     },
+  },
+  {
+    path: ['column', 'list'],
+    summary: '列出物品表的列，以及当前工作区开了哪些',
+    usage: 'column list',
+    options: [],
+    run: cmdColumnList,
+  },
+  {
+    path: ['column', 'set'],
+    summary: '设置物品表显示哪些列（「物品」「到期时间」不可关）',
+    usage: 'column set <列> [更多列...] | column set --default | column set --show-all',
+    options: [
+      { name: 'default', type: 'boolean', desc: '恢复默认列' },
+      { name: 'showAll', type: 'boolean', desc: '全部打开' },
+      { name: 'ws', type: 'string', desc: '工作区（默认当前）', valueName: '工作区' },
+      DRY_RUN,
+    ],
+    run: cmdColumnSet,
   },
   {
     path: ['timeline'],

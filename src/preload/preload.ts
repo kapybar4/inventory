@@ -71,6 +71,17 @@ const api = {
   reorder: {
     items: (wsId: string | null, uuids: string[]) => call('item:reorder', wsId, uuids),
   },
+  /** 表格列配置 */
+  column: {
+    get: (wsId?: string | null) => call('column:get', wsId ?? null),
+    set: (wsId: string | null, visible: string[]) => call('column:set', wsId, visible),
+  },
+  /** 订阅「跨天了」事件 —— 剩余时间是算出来的，过了零点要重画 */
+  onDateChanged: (fn: () => void): (() => void) => {
+    const listener = (): void => fn();
+    ipcRenderer.on('date:changed', listener);
+    return () => ipcRenderer.removeListener('date:changed', listener);
+  },
   /** 时间轴 */
   timeline: {
     data: (wsId: string | null, opts?: Record<string, unknown>) => call('timeline:data', wsId, opts ?? null),

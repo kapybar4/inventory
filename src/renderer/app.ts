@@ -43,6 +43,17 @@ interface SchemaInfo {
   criticalMultiplier: number;
 }
 
+/** 一列的定义，由 core 下发（见 src/core/columns.ts） */
+interface ColumnDef {
+  key: string;
+  label: string;
+  hint: string;
+  /** 锁定：永远显示，勾选框禁用 */
+  lock?: boolean;
+  defaultOn: boolean;
+  align?: 'right';
+}
+
 interface WsRow {
   id: string;
   name: string;
@@ -98,6 +109,8 @@ interface GroupTreeResult {
   uncategorized: number;
   groups: GroupNode[];
   collapsed: string[];
+  /** 顺带带回的列配置，省一次往返 */
+  columns?: string[];
 }
 
 /** 排序字段 */
@@ -357,13 +370,41 @@ interface DshApi {
     /** 存拖动固定下来的组顺序、展开层级、排序字段、收起的分组 */
     prefs(
       wsId: string | null,
-      patch: { order?: Record<string, string[]>; levels?: number; sort?: string; collapsed?: string[] },
+      patch: {
+        order?: Record<string, string[]>;
+        levels?: number;
+        sort?: string;
+        collapsed?: string[];
+        columns?: string[];
+      },
     ): Promise<{ groupOrder: Record<string, string[]>; groupLevels: number; sortField: string; collapsed: string[] }>;
   };
   /** 拖动固定物品顺序（传这一组的新顺序，整份覆盖） */
   reorder: {
     items(wsId: string | null, uuids: string[]): Promise<{ reordered: number }>;
   };
+  /**
+   * 表格列配置。
+   *
+   * `visible` 是 core 用 `resolveColumns()` 解析后的结果 ——
+   * 「物品」「到期时间」无条件在里面，界面不需要自己保证。
+   */
+  column: {
+    get(wsId?: string | null): Promise<{
+      available: ColumnDef[];
+      locked: string[];
+      visible: string[];
+      defaults: string[];
+      minimal: boolean;
+    }>;
+    set(wsId: string | null, visible: string[]): Promise<{ visible: string[]; minimal: boolean }>;
+  };
+  /**
+   * 订阅「跨天了」。
+   *
+   * 剩余时间是算出来的，过了零点要重画。返回退订函数。
+   */
+  onDateChanged(fn: () => void): () => void;
   /** 时间轴 */
   timeline: {
     data(
@@ -427,6 +468,12 @@ const state: {
   categoryFilter: string;
   /** 物品页里展开了「一组库存」的行 */
   expanded: Set<string>;
+  /** 物品表当前显示哪些列。锁定列一定在里面（由 core 保证） */
+  columnVisible: string[];
+  /** 可配置的列清单，来自 core */
+  columnAvailable: ColumnDef[];
+  /** 不可关闭的列 */
+  columnLocked: string[];
 } = {
   info: null,
   schema: null,
@@ -448,6 +495,9 @@ const state: {
   groupOnlyExpired: false,
   categoryFilter: '',
   expanded: new Set<string>(),
+  columnVisible: [],
+  columnAvailable: [],
+  columnLocked: [],
 };
 
 /** 把分组树拍平成一份物品清单（概览页、各处统计用） */
@@ -813,14 +863,123 @@ async function loadGroupTree(): Promise<void> {
   state.groupLevels = state.groupTree.requestedLevels;
   state.sortField = state.groupTree.sortedBy;
   state.collapsed = new Set(state.groupTree.collapsed);
+  // 分组接口顺带把列配置带回来了，省一次往返
+  if (Array.isArray(state.groupTree.columns)) state.columnVisible = state.groupTree.columns;
 }
 
-/** 存界面偏好（组顺序 / 层级 / 排序字段 / 收起状态） */
+/**
+ * 加载列配置。
+ *
+ * 界面**不自己算**"哪些列必须有" —— `visible` 是 core 用 `resolveColumns()`
+ * 解析出来的，锁定列无条件在里面。界面只负责把 `available` 画成勾选框。
+ */
+async function loadColumns(): Promise<void> {
+  try {
+    const r = await window.api.column.get(state.wsId);
+    state.columnAvailable = r.available;
+    state.columnLocked = r.locked;
+    state.columnVisible = r.visible;
+  } catch (err) {
+    fail(err);
+  }
+}
+
+/**
+ * 列设置。
+ *
+ * 勾选框按列定义生成，「物品」「到期时间」标成**必显且禁用**并给出理由 ——
+ * 不是灰掉一个框就完事，要让用户明白为什么不能关。
+ *
+ * 即时生效：每勾一下立刻存并重画，不搞"确定/取消"——
+ * 用户能马上看到表变成什么样，改动也是可逆的。
+ */
+function openColumnSettings(): void {
+  const body = el('div', { class: 'col-config' });
+
+  body.append(
+    el('p', {
+      class: 'muted small',
+      text: '选择物品表显示哪些列。物品页、分组页、概览的「最先到期」共用这一份设置，按工作区各自保存。',
+    }),
+  );
+
+  const list = el('div', { class: 'col-list' });
+
+  const redraw = (): void => {
+    list.innerHTML = '';
+    for (const c of state.columnAvailable) {
+      const on = state.columnVisible.includes(c.key);
+      const locked = state.columnLocked.includes(c.key);
+
+      const row = el('label', { class: `col-row${locked ? ' locked' : ''}` });
+      const box = el('input', { type: 'checkbox', name: `col_${c.key}` }) as HTMLInputElement;
+      box.checked = on || locked;
+      box.disabled = locked;
+
+      const text = el('span', { class: 'col-text' });
+      text.append(el('b', { text: c.label }));
+      if (locked) text.append(el('span', { class: 'col-lock', text: '必显' }));
+      text.append(el('span', { class: 'col-hint', text: c.hint }));
+      row.append(box, text);
+
+      if (!locked) {
+        box.addEventListener('change', () => {
+          void applyColumnChange(c.key, box.checked);
+        });
+      }
+      list.append(row);
+    }
+  };
+
+  /** 勾一下：本地先算出新清单，交给 core 存，再按 core 的结果回填 */
+  async function applyColumnChange(key: string, on: boolean): Promise<void> {
+    const next = new Set(state.columnVisible);
+    if (on) next.add(key);
+    else next.delete(key);
+    try {
+      const r = await window.api.column.set(state.wsId, [...next]);
+      // 用 core 返回的结果，而不是本地那份 —— 锁定列可能被补回来
+      state.columnVisible = r.visible;
+      redraw();
+      render();
+    } catch (err) {
+      fail(err);
+      redraw();
+    }
+  }
+
+  const reset = el('button', { class: 'ghost small', text: '恢复默认列' });
+  reset.addEventListener('click', () => {
+    void (async () => {
+      try {
+        const defaults = state.columnAvailable.filter((c) => c.defaultOn).map((c) => c.key);
+        const r = await window.api.column.set(state.wsId, defaults);
+        state.columnVisible = r.visible;
+        redraw();
+        render();
+      } catch (err) {
+        fail(err);
+      }
+    })();
+  });
+
+  redraw();
+  body.append(list, el('div', { class: 'col-actions' }, reset));
+
+  openModal({
+    title: '列设置',
+    body,
+    actions: [{ label: '完成', kind: 'primary', onClick: () => $('#modal-root').classList.add('hidden') }],
+  });
+}
+
+/** 存界面偏好（组顺序 / 层级 / 排序字段 / 收起状态 / 列） */
 async function savePrefs(patch: {
   order?: Record<string, string[]>;
   levels?: number;
   sort?: string;
   collapsed?: string[];
+  columns?: string[];
 }): Promise<void> {
   if (!state.wsId) return;
   try {
@@ -830,8 +989,7 @@ async function savePrefs(patch: {
   }
 }
 
-/** 排序字段清单来自 core，界面不自己维护一份 */
-async function loadSortFields(): Promise<void> {
+/** 排序字段清单来自 core，界面不自己维护一份 */async function loadSortFields(): Promise<void> {
   const schema = state.schema as unknown as { sortFields?: SortFieldDef[] } | null;
   if (schema?.sortFields) {
     state.sortFields = schema.sortFields;
@@ -855,7 +1013,7 @@ async function refreshItems(): Promise<void> {
 
 async function reloadAll(): Promise<void> {
   await refreshWorkspaces();
-  await Promise.all([refreshAlerts(), refreshItems(), loadTimeline(), loadGroupTree()]);
+  await Promise.all([refreshAlerts(), refreshItems(), loadTimeline(), loadGroupTree(), loadColumns()]);
   renderBanner();
   render();
 }
@@ -1091,15 +1249,18 @@ function restockTable(rows: RestockRow[]): HTMLElement {
 }
 
 /**
- * 物品表（只读）。
+ * 「最先到期」表。
  *
- * 用在概览页「最先到期的」。分组页里用的是带拖动能力的另一张表，
- * 因为那张表每行都要挂拖动事件，职责不同就不硬合并。
+ * 用的是与物品页、分组页**同一份列配置** —— 三处是同一份物品清单，
+ * 列不一致会让人以为看到的是不同的数据。
  */
 function itemsTable(items: ItemRow[]): HTMLElement {
+  const cols = visibleItemCols(state.columnVisible);
   const t = el('table');
   const head = el('tr');
-  for (const h of ['名称', '分类', '到期日', '剩余时间', '数量', '位置']) head.append(el('th', { text: h }));
+  for (const c of cols) {
+    head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
+  }
   t.append(el('thead', {}, head));
 
   const body = el('tbody');
@@ -1107,20 +1268,15 @@ function itemsTable(items: ItemRow[]): HTMLElement {
     const expired = it.expiry.some((e) => e.expired);
     const tr = el('tr', { class: expired ? 'row-expired' : '' });
 
-    const nameCell = el('td');
-    const link = el('a', { class: 'link', text: it.name });
-    link.addEventListener('click', () => void openItem(it.uuid));
-    nameCell.append(link);
-    if (it.is_bulk === 'true') nameCell.append(el('span', { class: 'tag bulk', text: '批量' }));
-    if (it.isLongTerm) nameCell.append(el('span', { class: 'tag lt', text: '长期' }));
-    if (expired) nameCell.append(el('span', { class: 'tag danger', text: '已过期' }));
-    tr.append(nameCell);
-
-    tr.append(td(enumLabel('item_category', it.category) || '未分类', 'muted'));
-    tr.append(td(it.expiresOn ?? '长期', it.isLongTerm ? 'muted' : 'mono'));
-    tr.append(td(it.isLongTerm ? '—' : it.daysLeftText, expired ? 'danger-text' : 'muted'));
-    tr.append(td(it.is_bulk === 'true' ? `${it.remaining}/${it.quantity}` : String(it.remaining), 'right'));
-    tr.append(td([it.room, it.container].filter(Boolean).join(' / '), 'muted'));
+    const bulk = it.is_bulk === 'true';
+    const worst = it.expiry.find((e) => e.expired) ?? (it.isLongTerm ? undefined : it.expiry[0]);
+    const ctx: ColCtx = { worst, bulk };
+    for (const c of cols) {
+      const cell = c.cell(it, ctx);
+      // 概览页要在名称旁多标一个「已过期」——这一页就是给你扫过期的
+      if (c.key === 'name' && expired) cell.append(el('span', { class: 'tag danger', text: '已过期' }));
+      tr.append(cell);
+    }
     body.append(tr);
   }
   t.append(body);
@@ -1394,10 +1550,16 @@ function toggleCollapse(key: string): void {
  */
 function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
   const draggable = state.sortField === 'manual';
+  const cols = visibleItemCols(state.columnVisible);
+
   const t = el('table', { class: 'items group-items' });
   const head = el('tr');
   if (draggable) head.append(el('th', { class: 'seq', text: '' }));
-  for (const h of ['#', '名称', '到期', '剩余时间', '数量', '位置', '']) head.append(el('th', { text: h }));
+  head.append(el('th', { class: 'seq', text: '#' }));
+  for (const c of cols) {
+    head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
+  }
+  head.append(el('th', { text: '' }));
   t.append(el('thead', {}, head));
 
   const body = el('tbody');
@@ -1418,35 +1580,19 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
     // 位次：排序开着时是排序后的位置，关着时就是手动顺序的位置
     tr.append(td(String(i + 1), 'seq muted'));
 
-    const nameCell = el('td');
-    const link = el('a', { class: 'link', text: it.name });
-    link.addEventListener('click', () => void openItem(it.uuid));
-    nameCell.append(link);
-    if (it.is_prescription === 'true') nameCell.append(el('span', { class: 'tag rx', text: '处方' }));
-    if (it.is_bulk === 'true') nameCell.append(el('span', { class: 'tag bulk', text: '批量' }));
-    if (it.isLongTerm) nameCell.append(el('span', { class: 'tag lt', text: '长期' }));
-    tr.append(nameCell);
-
-    const worst = it.expiry.find((e) => e.expired) ?? it.expiry[0];
-    tr.append(td(it.expiresOn ?? '长期', it.isLongTerm ? 'muted' : 'mono'));
-    tr.append(
-      td(
-        it.isLongTerm ? '—' : it.daysLeftText,
-        it.expiry.some((e) => e.expired) ? 'lvl-expired-text' : 'muted',
-      ),
-    );
-    tr.append(td(it.is_bulk === 'true' ? `${it.remaining}/${it.quantity}` : String(it.remaining), 'right'));
-    tr.append(td([it.room, it.container].filter(Boolean).join(' / '), 'muted'));
+    const bulk = it.is_bulk === 'true';
+    const worst = it.expiry.find((e) => e.expired) ?? (it.isLongTerm ? undefined : it.expiry[0]);
+    const ctx: ColCtx = { worst, bulk };
+    for (const c of cols) tr.append(c.cell(it, ctx));
 
     const ops = el('td', { class: 'ops' });
-    const use = el('button', { class: 'ghost small', text: it.is_bulk === 'true' ? '领用' : '消耗' });
-    use.addEventListener('click', () => void doConsume(it, it.is_bulk === 'true' ? 1 : it.remaining, 'consume'));
+    const use = el('button', { class: 'ghost small', text: bulk ? '领用' : '消耗' });
+    use.addEventListener('click', () => void doConsume(it, bulk ? 1 : it.remaining, 'consume'));
     const edit = el('button', { class: 'ghost small', text: '编辑' });
     edit.addEventListener('click', () => openItemForm(it.uuid));
     ops.append(use, edit);
     tr.append(ops);
 
-    void worst;
     body.append(tr);
   });
 
@@ -1872,6 +2018,132 @@ function groups_count(data: TimelineData, slot: number): number {
   return n;
 }
 
+/**
+ * 可配置的物品列。
+ *
+ * 列定义（哪些列存在、哪些不可关）由 core 通过 `column:get` 下发，
+ * 这里只负责**怎么画**。分成两半的理由：
+ *   - 约束要在数据层（core 的 `resolveColumns` 无条件补回锁定列），
+ *     界面被绕过也改不坏
+ *   - 画法是纯 DOM 的事，塞进 core 会让 core 沾上浏览器概念
+ *
+ * 「剩余时间」不是独立一列：它是算出来的，跟着「到期时间」一起出现。
+ * 这样就不存在「开着剩余时间却关掉了到期日」这种说不通的状态。
+ */
+interface ItemCol {
+  key: string;
+  /** 表头文案 */
+  head: string;
+  /** 单元格内容 */
+  cell: (it: ItemRow, ctx: ColCtx) => HTMLElement;
+  /** 单元格的 class */
+  cls?: string;
+  align?: 'right';
+}
+
+interface ColCtx {
+  /** 这一行的到期严重度，供「剩余时间」上色 */
+  worst: ExpiryInfo | undefined;
+  bulk: boolean;
+}
+
+function itemCols(): ItemCol[] {
+  return [
+    {
+      key: 'name',
+      head: '物品',
+      cell: (it, ctx) => {
+        const cell = el('td');
+        const link = el('a', { class: 'link', text: it.name });
+        link.addEventListener('click', () => void openItem(it.uuid));
+        cell.append(link);
+        if (it.is_prescription === 'true') cell.append(el('span', { class: 'tag rx', text: '处方' }));
+        if (ctx.bulk) cell.append(el('span', { class: 'tag bulk', text: '批量' }));
+        if (it.isLongTerm) cell.append(el('span', { class: 'tag lt', text: '长期' }));
+        return cell;
+      },
+    },
+    {
+      key: 'expiry',
+      head: '到期时间',
+      cell: (it, ctx) => {
+        // 到期日 + 剩余时间放同一格：两者是同一件事的两种说法，
+        // 拆成两列会让「可配置」多出一个没有意义的中间状态
+        const cell = el('td', { class: 'expiry-cell' });
+        const inner = el('div');
+        if (it.isLongTerm) {
+          inner.append(el('span', { class: 'muted', text: '长期' }));
+          cell.append(inner);
+          return cell;
+        }
+        inner.append(el('span', { class: 'mono', text: it.expiresOn ?? '' }));
+        inner.append(
+          el('span', {
+            class: `expiry-left ${ctx.worst?.expired ? 'lvl-expired-text' : ctx.worst ? 'lvl-warn-text' : 'muted'}`,
+            text: it.daysLeftText,
+          }),
+        );
+        cell.append(inner);
+        return cell;
+      },
+    },
+    {
+      key: 'category',
+      head: '分类',
+      cls: 'muted',
+      cell: (it) => td(enumLabel('item_category', it.category) || '未分类', 'muted'),
+    },
+    { key: 'brand', head: '品牌', cell: (it) => td(it.brand ?? '', 'muted') },
+    { key: 'model', head: '型号', cell: (it) => td(it.model ?? '', 'muted mono') },
+    {
+      key: 'location',
+      head: '位置',
+      cell: (it) => td([it.room, it.container].filter(Boolean).join(' / '), 'muted'),
+    },
+    {
+      key: 'quantity',
+      head: '数量',
+      align: 'right',
+      cell: (it, ctx) => {
+        const cell = el('td', { class: 'right' });
+        if (ctx.bulk) {
+          cell.append(stockBar(it.remaining, Math.max(it.quantity, it.minStock, 1), it.lowStock));
+          if (it.stockCount > 0) {
+            const chip = el('button', {
+              class: 'stock-chip',
+              type: 'button',
+              text: `${it.stockCount} 组`,
+            });
+            chip.title = '这组库存拆成了几条，点开看各自的数量与到期日';
+            chip.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              void openItem(it.uuid);
+            });
+            cell.append(chip);
+          }
+        } else {
+          const box = el('span', { class: `qty-plain${it.remaining <= 0 ? ' spent' : ''}` });
+          box.textContent = String(it.remaining);
+          box.title = it.remaining <= 0 ? '已消耗完，可一键清理' : '普通物品，数量恒为 1';
+          cell.append(box);
+        }
+        return cell;
+      },
+    },
+    { key: 'purchased', head: '购买', cell: (it) => td(it.purchased_on ?? '', 'muted mono') },
+  ];
+}
+
+/** 按配置取列定义。`keys` 来自 core，已经保证锁定列在里面 */
+function visibleItemCols(keys: string[] | undefined): ItemCol[] {
+  const all = itemCols();
+  if (!keys || keys.length === 0) return all;
+  const wanted = new Set(keys);
+  const picked = all.filter((c) => wanted.has(c.key));
+  // 兜底：core 已经保证「物品」「到期时间」在，这里再防一次空表
+  return picked.length > 0 ? picked : all;
+}
+
 function renderItems(view: HTMLElement): void {
   const bar = el('div', { class: 'toolbar' });
 
@@ -1909,6 +2181,11 @@ function renderItems(view: HTMLElement): void {
   });
   bar.append(roomSel);
 
+  const colBtn = el('button', { class: 'ghost', text: '列设置' });
+  colBtn.title = '选择这张表显示哪些列。「物品」与「到期时间」必须显示。';
+  colBtn.addEventListener('click', () => openColumnSettings());
+  bar.append(colBtn);
+
   const addBtn = el('button', { class: 'primary', text: '＋ 新增物品' });
   addBtn.addEventListener('click', () => openItemForm(null));
   bar.append(addBtn);
@@ -1920,11 +2197,15 @@ function renderItems(view: HTMLElement): void {
     return;
   }
 
+  const cols = visibleItemCols(state.columnVisible);
+
   const t = el('table', { class: 'items' });
   const head = el('tr');
-  for (const h of ['', '名称', '分类', '品牌', '型号', '位置', '数量', '购买', '到期', '剩余时间', '']) {
-    head.append(el('th', { text: h }));
+  head.append(el('th', { class: 'col-dot', text: '' })); // 到期状态色点，固定列
+  for (const c of cols) {
+    head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
   }
+  head.append(el('th', { text: '' })); // 操作列，固定
   t.append(el('thead', {}, head));
 
   const body = el('tbody');
@@ -1942,54 +2223,8 @@ function renderItems(view: HTMLElement): void {
         : td('·', 'dot muted'),
     );
 
-    const nameCell = el('td');
-    const link = el('a', { class: 'link', text: it.name });
-    link.addEventListener('click', () => void openItem(it.uuid));
-    nameCell.append(link);
-    if (it.is_prescription === 'true') nameCell.append(el('span', { class: 'tag rx', text: '处方' }));
-    if (bulk) nameCell.append(el('span', { class: 'tag bulk', text: '批量' }));
-    if (it.isLongTerm) nameCell.append(el('span', { class: 'tag lt', text: '长期' }));
-    tr.append(nameCell);
-
-    tr.append(td(enumLabel('item_category', it.category), 'muted'));
-    tr.append(td(it.brand ?? '', 'muted'));
-    tr.append(td(it.model ?? '', 'muted mono'));
-    tr.append(td([it.room, it.container].filter(Boolean).join(' / '), 'muted'));
-
-    // 数量：开了批量的显示「剩余/总数」+ 库存条，并且库存组数可展开
-    const qtyCell = el('td', { class: 'right' });
-    if (bulk) {
-      qtyCell.append(stockBar(it.remaining, Math.max(it.quantity, it.minStock, 1), it.lowStock));
-      // 嵌套列：这组库存拆成了几条，点一下看明细
-      if (it.stockCount > 0) {
-        const chip = el('button', {
-          class: 'stock-chip',
-          type: 'button',
-          text: `${it.stockCount} 组`,
-        });
-        chip.title = '这组库存拆成了几条，点开看各自的数量与到期日';
-        chip.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          void openItem(it.uuid);
-        });
-        qtyCell.append(chip);
-      }
-    } else {
-      const box = el('span', { class: `qty-plain${it.remaining <= 0 ? ' spent' : ''}` });
-      box.textContent = String(it.remaining);
-      box.title = it.remaining <= 0 ? '已消耗完，可一键清理' : '普通物品，数量恒为 1';
-      qtyCell.append(box);
-    }
-    tr.append(qtyCell);
-
-    tr.append(td(it.purchased_on ?? '', 'muted mono'));
-    tr.append(td(it.expiresOn ?? '长期', it.isLongTerm ? 'muted' : 'mono'));
-    tr.append(
-      td(
-        it.isLongTerm ? '—' : it.daysLeftText,
-        worst?.expired ? 'lvl-expired-text' : worst ? 'lvl-warn-text' : 'muted',
-      ),
-    );
+    const ctx: ColCtx = { worst, bulk };
+    for (const c of cols) tr.append(c.cell(it, ctx));
 
     const ops = el('td', { class: 'ops' });
     const use = el('button', { class: 'ghost small', text: bulk ? '领用' : '消耗' });
@@ -2005,17 +2240,21 @@ function renderItems(view: HTMLElement): void {
     body.append(tr);
 
     // ── 嵌套行：批量物品配了「一组库存」时，紧跟着列出每一条 ──
+    // 列数随配置变，所以用 colspan 撑一格而不是硬凑空 td
     if (bulk && it.stockCount > 1 && state.expanded.has(it.uuid)) {
       const sub = el('tr', { class: 'stock-sub' });
       sub.append(el('td', { class: 'dot muted', text: '└' }));
-      sub.append(
-        td(`分为 ${it.stockCount} 组库存`, 'muted small'),
-        td('', ''), td('', ''), td('', ''),
-        td(`${it.remaining} / ${it.quantity}`, 'right mono'),
-        td('', ''), td('', ''),
-        td('点「领用」时按先到期先出依次扣', 'muted small'),
-        td('', ''),
+      const info = el('td', { class: 'muted small' });
+      info.colSpan = cols.length;
+      info.append(
+        el('span', { text: '分为 ' }),
+        el('span', { class: 'mono', text: String(it.stockCount) }),
+        el('span', { text: ' 组库存，合计 ' }),
+        el('span', { class: 'mono', text: `${it.remaining} / ${it.quantity}` }),
+        el('span', { text: '，点「领用」时按先到期先出依次扣' }),
       );
+      sub.append(info);
+      sub.append(el('td', { text: '' }));
       body.append(sub);
     }
   }
@@ -3081,9 +3320,44 @@ function wireChrome(): void {
   });
 }
 
+/**
+ * 跨天时重画。
+ *
+ * 「剩余时间」是算出来的（到期日 − 今天），所以它在页面上会自己过期：
+ * 开着应用过一夜，昨天写的"剩 7 个月"今天就错了。
+ *
+ * 三个刷新时机（需求里点名了）：
+ *   1. **零点** —— 主进程定时广播 `date:changed`
+ *   2. **打开程序** —— 首屏本来就会重算
+ *   3. **改了到期时间** —— 走既有的 reloadAll()
+ *
+ * 这里额外做一道自检：主进程的定时器在系统睡眠期间不保证准时，
+ * 所以自己每 60 秒比一次日期，外加窗口重新获得焦点时比一次。
+ * 两个检查都很便宜（只比字符串），不会有什么开销。
+ */
+function wireDateRollover(): void {
+  let lastDay = new Date().toDateString();
+
+  const check = (): void => {
+    const now = new Date().toDateString();
+    if (now === lastDay) return;
+    lastDay = now;
+    // 跨天了：提醒与剩余时间都要重算
+    void reloadAll();
+  };
+
+  window.api.onDateChanged(check);
+  window.addEventListener('focus', check);
+  window.setInterval(check, 60_000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) check();
+  });
+}
+
 async function boot(): Promise<void> {
   try {
     wireChrome();
+    wireDateRollover();
     state.info = await window.api.app.info();
     state.schema = await window.api.app.schema();
     await loadSortFields();

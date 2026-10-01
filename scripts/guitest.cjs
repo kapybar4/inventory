@@ -97,7 +97,96 @@ app.whenReady().then(() => {
       return { hits };
     `);
 
-    // ── 3. 新增：打开表单 ──
+    // ── 3. 列配置 ──
+    await ev('03a_打开列设置', `${PRELUDE}
+      clickButton($('#view'), /列设置/);
+      await wait(700);
+      const m = need(modal(), '列设置弹窗');
+      const rows = Array.from(m.querySelectorAll('.col-row'));
+      return {
+        title: m.querySelector('h2') ? m.querySelector('h2').textContent : null,
+        rowCount: rows.length,
+        // 哪些是可勾的、哪些被锁住
+        enabled: Array.from(m.querySelectorAll('.col-row:not(.locked) input')).map(i => i.getAttribute('name')),
+        locked: Array.from(m.querySelectorAll('.col-row.locked input')).map(i => ({ name: i.getAttribute('name'), disabled: i.disabled, checked: i.checked })),
+        lockBadges: Array.from(m.querySelectorAll('.col-lock')).map(x => x.textContent),
+        hasReset: Array.from(m.querySelectorAll('button')).some(b => /恢复默认/.test(b.textContent)),
+      };
+    `);
+
+    await ev('03b_取消一列', `${PRELUDE}
+      const m = need(modal(), '列设置弹窗');
+      const box = m.querySelector('[name=col_brand]');
+      if (!box) throw new Error('没有 brand 的勾选框');
+      const headersBefore = $$('#view thead th').map(th => th.textContent.trim());
+      box.checked = false;
+      box.dispatchEvent(new Event('change'));
+      await wait(1100);
+      return {
+        headersBefore,
+        headersAfter: $$('#view thead th').map(th => th.textContent.trim()),
+        stillOpen: !!modal(),
+      };
+    `);
+
+    await ev('03c_必显列勾不动', `${PRELUDE}
+      const m = need(modal(), '列设置弹窗');
+      const nameBox = m.querySelector('[name=col_name]');
+      const expBox = m.querySelector('[name=col_expiry]');
+      if (!nameBox || !expBox) throw new Error('必显列的勾选框不见了');
+      const wasDisabled = nameBox.disabled && expBox.disabled;
+      // 硬来：绕过 disabled 直接把 checked 改掉再触发 change，看核心会不会补回来
+      nameBox.checked = false;
+      nameBox.dispatchEvent(new Event('change'));
+      await wait(900);
+      // 关键看**存储层**。弹窗会重绘，抓着的旧节点读出来不准
+      const saved = await window.api.column.get(null);
+      const fresh = $('#modal-root [name=col_name]');
+      return {
+        wasDisabled,
+        savedVisible: saved.visible,
+        savedHasName: saved.visible.includes('name'),
+        savedHasExpiry: saved.visible.includes('expiry'),
+        checkboxAfterRedraw: fresh ? { checked: fresh.checked, disabled: fresh.disabled } : null,
+        headers: $$('#view thead th').map(th => th.textContent.trim()),
+      };
+    `);
+
+    await ev('03d_关掉弹窗并确认持久化', `${PRELUDE}
+      const m = need(modal(), '列设置弹窗');
+      clickButton(m, /完成/);
+      await wait(600);
+      const headersNow = $$('#view thead th').map(th => th.textContent.trim());
+      // 切走再回来，看列设置还在不在
+      need(tab('概览'), '概览页签').click();
+      await wait(1000);
+      // 概览页的「最先到期」用同一份配置，列应当与物品页一致
+      const firstTable = $('#view table');
+      const overviewHeaders = firstTable
+        ? Array.from(firstTable.querySelectorAll('thead th')).map(th => th.textContent.trim())
+        : [];
+      need(tab('物品'), '物品页签').click();
+      await wait(900);
+      return {
+        headersNow,
+        overviewHeaders,
+        headersAfterTabSwitch: $$('#view thead th').map(th => th.textContent.trim()),
+      };
+    `);
+
+    await ev('03e_恢复默认列', `${PRELUDE}
+      clickButton($('#view'), /列设置/);
+      await wait(700);
+      const m = need(modal(), '列设置弹窗');
+      clickButton(m, /恢复默认/);
+      await wait(1100);
+      const restored = $$('#view thead th').map(th => th.textContent.trim());
+      clickButton(need(modal(), '列设置弹窗'), /完成/);
+      await wait(500);
+      return { restored };
+    `);
+
+    // ── 4. 新增：打开表单 ──
     await ev('04_打开新增表单', `${PRELUDE}
       clickButton($('#view'), /新增物品/);
       await wait(800);
