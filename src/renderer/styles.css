@@ -1062,27 +1062,6 @@ tbody tr.stock-sub td {
 
 /* ───────────── 分组页：拖动、层级、未分类 ───────────── */
 
-.uncat-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 13px;
-  margin-bottom: 14px;
-  border-radius: var(--r-sm);
-  background: rgba(245, 181, 68, 0.08);
-  border: 1px solid rgba(245, 181, 68, 0.28);
-  font-size: 12.5px;
-  color: var(--warn);
-}
-
-.uncat-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--warn);
-  flex: 0 0 auto;
-}
-
 .group-section {
   margin-bottom: 8px;
 }
@@ -1183,6 +1162,34 @@ tbody tr.stock-sub td {
 }
 
 .group-section.pinned > .group-head .group-label {
+  color: var(--warn);
+}
+
+/*
+ * 「未分类」标签右边的悬停说明标记。
+ *
+ * 用圈起来的问号而不是 ℹ —— 它就在组名右边，问号更像"这里可以问一下"，
+ * 而且和只读的信息图标区分得开。默认半透明，悬停和键盘聚焦时浮出来，
+ * 免得在一个整行可点的标题里显得突兀。
+ */
+.group-head .pin-tip {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  color: var(--fg-faint);
+  font-size: 10px;
+  line-height: 13px;
+  text-align: center;
+  cursor: help;
+  opacity: 0.7;
+  transition: opacity 0.12s, color 0.12s;
+}
+
+.group-head .pin-tip:hover,
+.group-head .pin-tip:focus {
+  opacity: 1;
   color: var(--warn);
 }
 

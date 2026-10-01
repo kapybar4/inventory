@@ -1437,17 +1437,14 @@ function renderGroups(view: HTMLElement): void {
     ),
   );
 
-  // ── 未分类提示：置顶且醒目，推动用户去分类 ──
-  if (tree.uncategorized > 0) {
-    const warn = el('div', { class: 'uncat-banner' });
-    warn.append(el('span', { class: 'uncat-dot' }));
-    warn.append(
-      el('span', {
-        text: `有 ${tree.uncategorized} 件物品还没分类，它们在「未分类」组里 —— 这一组永远在最上面，不会被排序或拖动移走。`,
-      }),
-    );
-    view.append(warn);
-  }
+  /*
+   * 「还没分类」这件事不再用顶部横幅说。
+   *
+   * 横幅占了整整一行，却只是在讲一件「未分类」组自己就能说明的事 ——
+   * 而那一组永远置顶，本来就在第一屏里。说明改挂在组标题右边的悬停标记上
+   * （见下面 renderGroupNode 的 unpin-tip），想看的人悬停即得，
+   * 其余时候不占地方。
+   */
 
   // ── 工具栏 ──
   const bar = el('div', { class: 'toolbar' });
@@ -1628,7 +1625,6 @@ function renderGroups(view: HTMLElement): void {
 
     if (node.pinned) {
       head.append(el('span', { class: 'pin', text: '📌' }));
-      head.title = '未分类：永远置顶，不可拖动';
     } else {
       const grip = el('span', { class: 'grip', text: '⋮⋮' });
       grip.title = '拖动可以固定这一组的顺序';
@@ -1638,6 +1634,22 @@ function renderGroups(view: HTMLElement): void {
 
     head.append(el('span', { class: 'group-label', text: node.label }));
 
+    /*
+     * 「未分类」右边挂一个悬停说明。
+     *
+     * 原来这段解释是页面顶部的一条横幅，但横幅讲的是这一组自己的性质，
+     * 挂在组标题旁边才对得上号 —— 也不占一整行。
+     *
+     * 件数用 `node.count`（这一组的物品数），正好就是"还没分类"的件数。
+     */
+    if (node.pinned) {
+      const tip = el('span', { class: 'pin-tip', text: '?' });
+      tip.title =
+        `有 ${node.count} 件物品还没分类，它们在「未分类」组里 —— ` +
+        '这一组永远在最上面，不会被排序或拖动移走。';
+      head.append(tip);
+    }
+
     const meta = el('span', { class: 'group-meta' });
     meta.append(el('span', { class: 'muted', text: `${node.count} 项` }));
     if (node.expired) meta.append(el('span', { class: 'badge danger', text: `${node.expired} 已过期` }));
@@ -1645,7 +1657,7 @@ function renderGroups(view: HTMLElement): void {
     // 过保单独标，用中性色 —— 它不是"要马上处理"的事
     if (node.warranty) meta.append(el('span', { class: 'badge muted', text: `${node.warranty} 过保` }));
     if (node.longTerm) meta.append(el('span', { class: 'muted', text: `${node.longTerm} 长期` }));
-    if (node.pinned) meta.append(el('span', { class: 'muted small', text: '置顶 · 不可拖动' }));
+    // 「置顶 · 不可拖动」不再单独标：右边那个悬停说明把它们讲全了
     head.append(meta);
 
     head.addEventListener('click', () => toggleCollapse(key));

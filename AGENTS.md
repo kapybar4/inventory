@@ -180,7 +180,7 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 94 项单元测试
+npm.cmd test            # 95 项单元测试
 npm.cmd run test:func   # 138 项 CLI/数据层功能测试
 npm.cmd run test:gui    # 34 步桌面端走查（要开 Electron）
 npm.cmd run test:all    # 单元 + 功能
@@ -284,7 +284,7 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、单元 94 项、CLI 138 项、往返不变式。
+**已验证**：核心功能、单元 95 项、CLI 138 项、往返不变式。
 桌面端走查的 34 步现在跑不完（见下），改界面时改用聚焦探针确认。
 
 **没验证**：

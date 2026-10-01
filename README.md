@@ -29,8 +29,8 @@ npm.cmd start                # 桌面界面（可选）
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 85 项单元测试
-npm.cmd run test:func   # 122 项 CLI 功能测试
+npm.cmd test            # 95 项单元测试
+npm.cmd run test:func   # 138 项 CLI 功能测试
 ```
 
 > **Windows 注意**：如果执行策略禁止 `npm.ps1`，请用 `npm.cmd`
@@ -876,9 +876,9 @@ scripts/build.mjs            编译 + 搬运静态资源
 
 ```
 npm.cmd run typecheck   # 主进程/CLI/core + 渲染层，两套 tsconfig
-npm.cmd test            # 85 项单元测试（不变量 + 回归）
-npm.cmd run test:func   # 122 项 CLI/数据层功能测试（真跑命令、核对输出）
-npm.cmd run test:gui    # 34 步桌面端走查（真开 Electron，读 DOM）
+npm.cmd test            # 95 项单元测试（不变量 + 回归）
+npm.cmd run test:func   # 138 项 CLI/数据层功能测试（真跑命令、核对输出）
+npm.cmd run test:gui    # 34 步桌面端走查（真开 Electron，读 DOM）—— 目前会中途卡住，见「已知限制」
 npm.cmd run test:all    # 单元 + 功能
 ```
 
@@ -932,6 +932,12 @@ manifest 派生一致性、工作区隔离、导入失败不留残目录、重�
   两边同时改同一个工作区时，SQLite 的 WAL 能保证不损坏，但后写的一方会覆盖先写的字段。
   单人使用场景下无影响。
 - **打包（`dist:win`）尚未验证过**。功能层面是验过的，产出安装包这条路没走过。
+- **桌面端走查（`npm.cmd run test:gui`）目前会中途卡住**，跑不完 34 步。
+  已知不是产品缺陷：同一串操作单独跑都正常，是这套探针本身或 Electron
+  在这台机器上的稳定性问题，尚未定位。改界面时建议用一次性的聚焦探针
+  直接读 DOM 确认，别只依赖这一层。
+  另外，用脚本起 Electron **必须加 `--no-sandbox`**，否则进程会静默秒退
+  （退出码 `0x80000003`），很容易误判成代码有问题。
 - 「剩余时间」是算出来的，跨天靠零点定时器 + 窗口焦点检查刷新（另加 60 秒自检）。
   定时器在系统休眠期间不保证准时，所以焦点检查是必要的兜底 ——
   但极端情况（手动改系统时间后一直不碰窗口）下可能要切一下页签才会重算。

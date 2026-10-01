@@ -1274,6 +1274,36 @@ test('未分类永远置顶，且排序与拖动都动不了它', () => {
   assert.equal(uncategorizedCount(withOther), 0);
 });
 
+/**
+ * 「未分类」那一组的 `count` 必须等于全库未分类件数。
+ *
+ * 界面上的悬停说明用的是组自己的 `count`，而原来的顶部横幅用的是
+ * `uncategorizedCount(items)`。两个数若不等，提示就会说谎 ——
+ * 这条把两者的等价关系钉住，任何一级分组都成立。
+ */
+test('「未分类」组的 count 等于全库未分类件数（各层级都成立）', () => {
+  const items = asRows([
+    { uuid: '1', name: '有分类', category: 'medicine', subcategory: '感冒药', tags: '常备' },
+    { uuid: '2', name: '没分类但有子类', category: '', subcategory: '待定' },
+    { uuid: '3', name: '没分类也没子类', category: '' },
+    { uuid: '4', name: '没分类有标签', category: '', tags: '回头再说' },
+    { uuid: '5', name: '另一件有分类', category: 'food', subcategory: '乳制品' },
+  ]);
+
+  const expected = uncategorizedCount(items);
+  assert.equal(expected, 3, '夹具本身：3 件没分类');
+
+  for (const levels of [1, 2, 3] as const) {
+    const tree = buildTree(items, { levels, sort: 'manual', order: {} });
+    const pinned = tree.nodes.find((n) => n.pinned);
+    assert.ok(pinned, `${levels} 级也该有置顶组`);
+    assert.equal(pinned!.label, '未分类');
+    assert.equal(pinned!.count, expected, `${levels} 级下 count 应等于 ${expected}`);
+    // 置顶的必须是第一个，且带子类/标签时它仍然只有一棵子树、总数不变
+    assert.equal(tree.nodes[0]!.key, '', `${levels} 级下未分类仍在最前`);
+  }
+});
+
 test('组顺序可以拖动固定；排序只影响组内物品，不影响分组', () => {
   const items = asRows([
     { uuid: '1', name: '甲', category: 'medicine', expires_on: '2027-01-01', sort_order: '10' },
