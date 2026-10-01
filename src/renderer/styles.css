@@ -2013,6 +2013,12 @@ tbody tr.selected .ops {
   font-size: 11.5px;
 }
 
+/* 到期来源：只在不是「保质期」时出现，免得用户拿这个日期对不上包装 */
+.expiry-src {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
 /* ── 展开列（补充信息）──
    默认只占一个箭头的位置，点开才在行下方铺开一块 */
 .col-extra {
@@ -2138,6 +2144,25 @@ td.wrap {
   white-space: normal;
   max-width: 260px;
   line-height: 1.45;
+}
+
+/* ── 简明视图开关 ──
+   打开后视觉上要明显"现在不是完整列表"，否则会以为是数据丢了 */
+.brief-toggle {
+  white-space: nowrap;
+}
+
+.brief-toggle.on {
+  background: var(--accent-soft, rgba(90, 160, 255, 0.18));
+  border-color: var(--accent, #6aa8ff);
+  color: var(--accent, #6aa8ff);
+}
+
+/* 过保用中性色：它提示的是"不再保修"，不是"东西坏了" */
+.badge.muted {
+  background: var(--bg-raised);
+  color: var(--fg-faint);
+  border: 1px solid var(--line);
 }
 
 .kv {

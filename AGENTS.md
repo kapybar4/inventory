@@ -98,6 +98,24 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   不要给它加独立的开关（会出现"开着剩余时间却关掉到期日"这种说不通的状态）；
   也不要把它存进库里 —— 存下来的相对时间第二天就是错的。
   刷新靠 `main.ts` 的零点定时广播 + 渲染层的焦点检查（另加 60 秒自检）。
+- **「过期」与「过保」是两件事，永远分开数**。按**日期来源**自动判定，不靠新字段：
+  保质期 / 开封后有效期 → `expire`（东西坏了）；质保期 → `warranty`（只是不保修了）。
+  判定只有一处实现：`core/alerts.ts` 的 `classifyKind()`。
+  顶部高亮、headline、`counts.expired` / `counts.soon` **只数 `expire`**；
+  过保走 `counts.warrantyExpired` / `GroupNode.warranty`，**不进高亮**。
+  曾经混在一起，结果是"鼠标保修到期"和"药过期了"一起报红，
+  真正不能吃的那个被淹掉 —— 别再合回去。
+- **「快到期」窗口是 15 天**，常量 `SOON_DAYS` 在 `core/alerts.ts`。
+  改它时记得同步渲染层的 `SOON_TEXT`（渲染层 import 不到 core）。
+- **判断一件东西"坏没坏"时不要用 `expiry.some(e => e.expired)`** ——
+  那会把过保算进来。用 `worstExpireEntry()`（core）或 `worstExpire()` / `hasExpired()`
+  （渲染层），它们内部已经滤掉 `warranty`。
+- **列表里显示的到期日要取「最紧迫的过期条目」，不是 `expires_on`**。
+  奶粉保质期还剩 20 天、开封后有效期只剩 3 天 —— 后者才是要处理的。
+  只显示 `expires_on` 会让简明视图和列表对不上，看着像筛错了。
+  显示的来源不是「保质期」时要在旁边标出来，否则用户对不上包装上的日期。
+- **`buildTree` 的 `now` 可注入**，测试请传固定日期。不然那些用固定日期的用例
+  过一段时间会自己变红，而且分不清是"测试过期了"还是"代码坏了"。
 - **展开区的固定三项（位置/规格/备注）是真实列，不是 JSON**。
   位置要参与分组与排序、规格要参与导出与搜索、备注要参与导出 ——
   塞进 `extra_json` 这些功能会**静默失效**（不会报错，只是搜不到、分组里没了）。
@@ -133,9 +151,9 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 77 项单元测试
-npm.cmd run test:func   # 112 项 CLI/数据层功能测试
-npm.cmd run test:gui    # 29 步桌面端走查（要开 Electron）
+npm.cmd test            # 85 项单元测试
+npm.cmd run test:func   # 122 项 CLI/数据层功能测试
+npm.cmd run test:gui    # 34 步桌面端走查（要开 Electron）
 npm.cmd run test:all    # 单元 + 功能
 ```
 
@@ -237,7 +255,7 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、单元 77 项、CLI 112 项、桌面端 29 步、往返不变式。
+**已验证**：核心功能、单元 85 项、CLI 122 项、桌面端 34 步、往返不变式。
 
 **没验证**：
 - **打包（`npm.cmd run dist:win`）从未跑通过。** electron-builder 已配好、

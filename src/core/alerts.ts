@@ -21,11 +21,47 @@ import type { WorkspaceEntry } from './workspace';
 import { ENUMS, CATEGORY_LEAD_DAYS } from './fields';
 import { formatDaysLeft, daysUntil, today, addDays } from './dates';
 
+/**
+ * 「快到期」的窗口：**15 天**。
+ *
+ * 只管一种到期：**过期**。过保（质保期到了）是另一回事 ——
+ * 东西还能用，只是不再保修，不该和"这盒药不能吃了"混在一个数字里。
+ */
+export const SOON_DAYS = 15;
+
+/** 到期来源的中文名 */
+export const KIND_SHELF_LIFE = '保质期';
+export const KIND_WARRANTY = '质保期';
+export const KIND_OPENED = '开封后有效期';
+
+/**
+ * 到期分两类，**按日期来源自动判定，不需要用户另填字段**：
+ *
+ *   - **过期**：保质期、开封后有效期 —— 东西坏了，不能再吃/用
+ *   - **过保**：质保期 —— 东西还能用，只是不再免费维修
+ *
+ * 这两件事对用户的含义完全不同。早先把它们混在「已过期」一个数字里，
+ * 结果是"鼠标保修到期了"和"药过期了"一起报红，真正要处理的反而被稀释。
+ */
+export type ExpiryKind = 'expire' | 'warranty';
+
+export function kindLabel(kind: ExpiryKind): string {
+  return kind === 'warranty' ? '过保' : '过期';
+}
+
+/** 某个来源算哪一类 */
+export function classifyKind(source: string): ExpiryKind {
+  // 质保期 → 过保；其余（保质期 / 开封后有效期）→ 过期
+  return source === KIND_WARRANTY ? 'warranty' : 'expire';
+}
+
 /** 一件物品的某个到期来源 */
 export interface ExpiryEntry {
   item: Row;
   /** 保质期 / 质保期 / 开封后有效期 */
   kind: string;
+  /** 这条日期算「过期」还是「过保」 */
+  alertKind: ExpiryKind;
   expiresOn: string;
   daysLeft: number;
   daysLeftText: string;
@@ -48,7 +84,11 @@ export interface CategoryGroup {
   entries: ExpiryEntry[];
   /** 该组内长期有效的物品 */
   longTerm: LongTermEntry[];
-  counts: { total: number; expired: number; items: number };
+  /**
+   * `expired` / `soon` **只数「过期」那类**（过保不计入）；
+   * `warrantyExpired` 单独记过保的数量，供列表展示用。
+   */
+  counts: { total: number; expired: number; soon: number; warrantyExpired: number; items: number };
 }
 
 export interface OverviewSummary {
@@ -62,9 +102,12 @@ export interface OverviewSummary {
     items: number;
     /** 有到期日的条目数 */
     dated: number;
+    /** **过期**的条目数（不含过保） */
     expired: number;
-    /** 30 天内到期（不含已过期） */
+    /** 15 天内到期、还没过期的条目数（不含过保） */
     soon: number;
+    /** 已过保的条目数。单独统计，**不进 headline、不进高亮** */
+    warrantyExpired: number;
     longTerm: number;
     /** 低于最低库存的批量物品数 */
     lowStock: number;
@@ -77,17 +120,17 @@ export function expirySources(item: Row): { expiresOn: string; kind: string }[] 
   const out: { expiresOn: string; kind: string }[] = [];
 
   const expiresOn = item['expires_on'] ? String(item['expires_on']) : '';
-  if (expiresOn) out.push({ expiresOn, kind: '保质期' });
+  if (expiresOn) out.push({ expiresOn, kind: KIND_SHELF_LIFE });
 
   const warranty = item['warranty_until'] ? String(item['warranty_until']) : '';
-  if (warranty) out.push({ expiresOn: warranty, kind: '质保期' });
+  if (warranty) out.push({ expiresOn: warranty, kind: KIND_WARRANTY });
 
   const shelf = item['open_shelf_life_days'];
   const openedOn = item['opened_on'] ? String(item['opened_on']) : '';
   if (shelf && openedOn) {
     const days = Number(shelf);
     const derived = addDays(openedOn, days);
-    if (derived) out.push({ expiresOn: derived, kind: '开封后有效期' });
+    if (derived) out.push({ expiresOn: derived, kind: KIND_OPENED });
   }
 
   return out;
@@ -108,12 +151,34 @@ export function expiriesForItem(item: Row, now: Date = new Date()): ExpiryEntry[
     return {
       item,
       kind: src.kind,
+      alertKind: classifyKind(src.kind),
       expiresOn: src.expiresOn,
       daysLeft,
       daysLeftText: formatDaysLeft(daysLeft),
       expired: daysLeft < 0,
     };
   });
+}
+
+/** 只要「过期」那类（保质期 / 开封后有效期），不含过保 */
+export function expireEntries(entries: ExpiryEntry[]): ExpiryEntry[] {
+  return entries.filter((e) => e.alertKind === 'expire');
+}
+
+/**
+ * 一件物品的最坏状态，**只看「过期」那类**。
+ *
+ * 过保不参与：鼠标过了保修不该让它在列表里报红 ——
+ * 那会淹掉真正不能吃、不能用的东西。
+ */
+export function worstExpireEntry(item: Row, now: Date = new Date()): ExpiryEntry | undefined {
+  const expiring = expireEntries(expiriesForItem(item, now));
+  return expiring.find((e) => e.expired) ?? expiring[0];
+}
+
+/** 到这一天为止要不要在「N 天内到期」里报数 */
+export function isSoon(entry: ExpiryEntry, withinDays = SOON_DAYS): boolean {
+  return entry.alertKind === 'expire' && !entry.expired && entry.daysLeft <= withinDays;
 }
 
 /** 分类的中文名 */
@@ -151,7 +216,7 @@ export function groupByCategory(items: Row[], now: Date = new Date()): CategoryG
         label: categoryLabel(key),
         entries: [],
         longTerm: [],
-        counts: { total: 0, expired: 0, items: 0 },
+        counts: { total: 0, expired: 0, soon: 0, warrantyExpired: 0, items: 0 },
       };
       byKey.set(key, group);
     }
@@ -165,7 +230,14 @@ export function groupByCategory(items: Row[], now: Date = new Date()): CategoryG
     for (const e of expiries) {
       group.entries.push(e);
       group.counts.total += 1;
-      if (e.expired) group.counts.expired += 1;
+      // 过保与过期分开数：过保不进「已过期」，也不进「N 天内到期」
+      if (e.alertKind === 'warranty') {
+        if (e.expired) group.counts.warrantyExpired += 1;
+      } else if (e.expired) {
+        group.counts.expired += 1;
+      } else if (e.daysLeft <= SOON_DAYS) {
+        group.counts.soon += 1;
+      }
     }
   }
 
@@ -213,26 +285,28 @@ export function summarizeOverview(
   let expired = 0;
   let dated = 0;
   let soon = 0;
+  let warrantyExpired = 0;
   let longTerm = 0;
   let itemCount = 0;
 
   for (const g of groups) {
     itemCount += g.counts.items;
     expired += g.counts.expired;
+    soon += g.counts.soon;
+    warrantyExpired += g.counts.warrantyExpired;
     dated += g.counts.total;
     longTerm += g.longTerm.length;
-    for (const e of g.entries) {
-      if (!e.expired && e.daysLeft <= 30) soon += 1;
-    }
   }
 
   const lowStock = lowStockItems(items).length;
 
-  const counts = { items: itemCount, dated, expired, soon, longTerm, lowStock };
+  const counts = { items: itemCount, dated, expired, soon, warrantyExpired, longTerm, lowStock };
 
+  // headline 只报「要马上处理的」：过期 + 快过期 + 待补货。
+  // **过保不进这里** —— 保修到期不等于东西坏了，混进来只会稀释真正的提醒。
   const parts: string[] = [];
   if (expired) parts.push(`${expired} 项已过期`);
-  if (soon) parts.push(`${soon} 项 30 天内到期`);
+  if (soon) parts.push(`${soon} 项 ${SOON_DAYS} 天内到期`);
   if (lowStock) parts.push(`${lowStock} 项待补货`);
   const headline = parts.length ? parts.join(' · ') : `${itemCount} 项在用，没有需要马上处理的`;
 

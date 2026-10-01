@@ -228,6 +228,56 @@ function pickKnownFields(table: string, input: Record<string, unknown>): Record<
   return out;
 }
 
+/**
+ * 把数据库裸行补成界面能直接渲染的物品对象。
+ *
+ * **一份实现，两个入口共用**（`item:list` 与 `group:list`）。
+ * 早先两处各写了一遍，结果 `isLongTerm` 的判法就不一样：
+ * 一处看 `expires_on` 是不是空，另一处看有没有任何到期来源 ——
+ * 于是"只有质保期"的物品在一个接口里是长期、在另一个里不是。
+ * 映射逻辑复制一份就会漂移，所以只留这一份。
+ */
+/**
+ * 界面用的物品对象：数据库裸行 + 一批派生字段。
+ *
+ * 派生出来的 `expiry` 是对象数组、`remaining` 是数字，都不满足 `Row` 的
+ * 「纯标量」约束，所以类型放宽成 Record —— 它只在 IPC 边界上流动。
+ */
+type DecoratedItem = Record<string, unknown>;
+
+function decorateItem(r: Row, counts: Map<string, number>): DecoratedItem {
+  const remaining = Number(r['remaining'] ?? 0);
+  const minStock = Number(r['min_stock'] ?? 0);
+  const expiresOn = r['expires_on'] ? String(r['expires_on']) : null;
+  const left = expiresOn ? daysUntil(expiresOn) : null;
+  const expiry = expiriesForItem(r);
+
+  const warrantyUntil = r['warranty_until'] ? String(r['warranty_until']) : null;
+
+  return {
+    ...r,
+    remaining,
+    minStock,
+    lowStock: minStock > 0 && remaining < minStock,
+    expiresOn,
+    warrantyUntil,
+    daysLeft: left,
+    daysLeftText: expiresOn ? formatDaysLeft(left) : '长期',
+    /**
+     * 「长期」= **完全没有到期来源**。
+     *
+     * 不能只看 `expires_on` 是不是空：只有质保期的物品（鼠标）确实有日期要记，
+     * 它不是"不用盯"的长期物品。
+     */
+    isLongTerm: expiry.length === 0,
+    leadDays: leadDaysFor(r),
+    unitPriceYuan: centsToYuan(r['unit_price_cents'] as string | null),
+    amountYuan: centsToYuan(r['amount_cents'] as string | null),
+    stockCount: counts.get(String(r['uuid'])) ?? 0,
+    expiry,
+  };
+}
+
 function withDb<T>(wsId: string | null, readOnly: boolean, fn: (db: ReturnType<typeof openDatabase>, entry: ReturnType<typeof requireWorkspace>) => T): T {
   const dd = dataDir();
   const entry = resolveWorkspace(dd, wsId);
@@ -514,29 +564,7 @@ function registerHandlers(): void {
 
       const rows = selectWhere(db, 'items', where.join(' AND ') + ' ORDER BY sort_order ASC, rowid ASC', params);
       const counts = stockCounts(db);
-
-      return rows.map((r) => {
-        const remaining = Number(r['remaining'] ?? 0);
-        const minStock = Number(r['min_stock'] ?? 0);
-        const expiresOn = r['expires_on'] ? String(r['expires_on']) : null;
-        const left = expiresOn ? daysUntil(expiresOn) : null;
-        return {
-          ...r,
-          remaining,
-          minStock,
-          lowStock: minStock > 0 && remaining < minStock,
-          expiresOn,
-          daysLeft: left,
-          daysLeftText: expiresOn ? formatDaysLeft(left) : '长期',
-          isLongTerm: !expiresOn,
-          leadDays: leadDaysFor(r),
-          unitPriceYuan: centsToYuan(r['unit_price_cents'] as string | null),
-          amountYuan: centsToYuan(r['amount_cents'] as string | null),
-          /** 用了「一组库存」时是子行条数 */
-          stockCount: counts.get(String(r['uuid'])) ?? 0,
-          expiry: expiriesForItem(r),
-        };
-      });
+      return rows.map((r) => decorateItem(r, counts));
     });
   });
 
@@ -718,33 +746,14 @@ function registerHandlers(): void {
        * 所以这里补齐，字段口径与 `item:list` 保持一致。
        */
       const counts = stockCounts(db);
-      const decorate = (r: Row) => {
-        const expiresOn = r['expires_on'] ? String(r['expires_on']) : null;
-        const left = expiresOn ? daysUntil(expiresOn) : null;
-        const remaining = Number(r['remaining'] ?? 0);
-        const minStock = Number(r['min_stock'] ?? 0);
-        const expiry = expiriesForItem(r);
-        return {
-          ...r,
-          remaining,
-          minStock,
-          lowStock: minStock > 0 && remaining < minStock,
-          expiresOn,
-          daysLeft: left,
-          daysLeftText: expiresOn ? formatDaysLeft(left) : '长期',
-          isLongTerm: expiry.length === 0,
-          leadDays: leadDaysFor(r),
-          unitPriceYuan: centsToYuan(r['unit_price_cents'] as string | null),
-          amountYuan: centsToYuan(r['amount_cents'] as string | null),
-          stockCount: counts.get(String(r['uuid'])) ?? 0,
-          expiry,
-        };
-      };
+      // 用与 item:list 同一份映射，别在这里再写一遍
+      const decorate = (r: Row): DecoratedItem => decorateItem(r, counts);
 
       const tree = buildTree(rows, {
         levels,
         sort: sortField,
         order: entry.groupOrder ?? {},
+        now: new Date(),
       });
 
       // 树里的 items 是裸行，递归补一遍
@@ -758,6 +767,8 @@ function registerHandlers(): void {
         expired: n.expired,
         soon: n.soon,
         longTerm: n.longTerm,
+        // 过保单列 —— 界面靠它区分「要处理的」和「只是不保修了」
+        warranty: n.warranty,
         items: n.items.map(decorate),
         children: n.children.map(decorateNode),
       });

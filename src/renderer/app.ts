@@ -97,6 +97,8 @@ interface GroupNode {
   expired: number;
   soon: number;
   longTerm: number;
+  /** 只有质保期到期的物品数。单独标，不进「已过期」也不进高亮 */
+  warranty: number;
 }
 
 interface GroupTreeResult {
@@ -149,6 +151,13 @@ interface AlertSummary {
 
 interface ExpiryInfo {
   kind: string;
+  /**
+   * 这条日期算「过期」还是「过保」，由来源自动判定：
+   * 保质期 / 开封后有效期 → expire；质保期 → warranty。
+   *
+   * 界面靠它决定报不报红 —— 保修到期不等于东西坏了。
+   */
+  alertKind?: 'expire' | 'warranty';
   expiresOn: string;
   daysLeft: number;
   daysLeftText: string;
@@ -485,6 +494,13 @@ const state: {
   /** 物品页里展开了「一组库存」的行 */
   expanded: Set<string>;
   /**
+   * 简明视图：只看「已过期」与「N 天内到期」的物品。
+   *
+   * 是个**筛选开关**而不是另一个页面 —— 打开就筛，关掉就回来，
+   * 当前的分组层级、排序、列设置都不受影响。
+   */
+  briefView: boolean;
+  /**
    * 展开了「补充信息」的行。
    *
    * 与 `expanded`（批量物品的库存明细）分开：两者可以同时展开，
@@ -518,6 +534,7 @@ const state: {
   groupOnlyExpired: false,
   categoryFilter: '',
   expanded: new Set<string>(),
+  briefView: false,
   extraOpen: new Set<string>(),
   columnVisible: [],
   columnAvailable: [],
@@ -630,12 +647,93 @@ function tableWrap(t: HTMLElement): HTMLElement {
   return wrap;
 }
 
-/** 严重度分布条 —— v3 已取消分级，这里保留一个「时间分布」条：过期 / 30 天内 / 之后 / 长期 */
+/**
+ * 「快到期」窗口的显示文案。
+ *
+ * 真正的阈值在 core 的 `SOON_DAYS`（那边是唯一真相，`counts.soon` 就按它算）。
+ * 渲染层 import 不到 core（纯 Node 模块 + rootDir 限制），所以这里只放文案；
+ * **改 core 的 SOON_DAYS 时记得同步这个字符串**。
+ */
+const SOON_TEXT = '15';
+
+/**
+ * 一件物品的「过期」类到期条目 —— **不含过保**。
+ *
+ * 质保期到了（过保）说明不再免费维修，不是"东西坏了"。
+ * 早先不区分，结果是"鼠标保修到期"和"药过期了"一起报红，
+ * 真正不能吃的那个反而被淹掉。
+ */
+function expireOnly(it: ItemRow): ExpiryInfo[] {
+  return it.expiry.filter((e) => e.alertKind !== 'warranty');
+}
+
+/**
+ * 一件物品最要紧的「过期」条目，用来决定列表里报不报红。
+ * 全是质保期的话返回 undefined —— 那件东西不报红。
+ */
+function worstExpire(it: ItemRow): ExpiryInfo | undefined {
+  const expiring = expireOnly(it);
+  return expiring.find((e) => e.expired) ?? expiring[0];
+}
+
+/** 这件东西有没有真的过期（不含过保） */
+function hasExpired(it: ItemRow): boolean {
+  return expireOnly(it).some((e) => e.expired);
+}
+
+/** 在不在「N 天内到期」（不含过保、不含已过期） */
+function isSoonItem(it: ItemRow): boolean {
+  return expireOnly(it).some((e) => !e.expired && e.daysLeft <= Number(SOON_TEXT));
+}
+
+/**
+ * 「简明视图」开关。
+ *
+ * 打开后只剩两种东西：**已过期**的和 **N 天内到期**的。
+ * 过滤是纯本地的（数据早就在 `state.items` 里），所以切换是瞬时的、
+ * 不产生任何请求，也不会动当前的分组层级与排序。
+ *
+ * 按钮上直接显示会剩几条 —— 免得点开发现是空的还得再点回来。
+ */
+function briefViewToggle(): HTMLElement {
+  const count = filterBrief(state.items).length;
+  const btn = el('button', {
+    class: `ghost brief-toggle${state.briefView ? ' on' : ''}`,
+    type: 'button',
+    text: state.briefView ? '✕ 退出简明视图' : `简明视图（${count}）`,
+  });
+  btn.title = state.briefView
+    ? '回到完整列表'
+    : `只显示已过期和 ${SOON_TEXT} 天内到期的物品（当前 ${count} 条）`;
+  btn.addEventListener('click', () => {
+    state.briefView = !state.briefView;
+    render();
+  });
+  return btn;
+}
+
+/**
+ * 简明视图：只留「已过期」与「N 天内到期」。
+ *
+ * 注意分母是 `expireOnly` —— 只过保的东西不该出现在简明视图里，
+ * 否则"简明"就失去意义了。
+ */
+function filterBrief(items: ItemRow[]): ItemRow[] {
+  return items.filter((it) => hasExpired(it) || isSoonItem(it));
+}
+
+/**
+ * 时间分布条：过期 / 15 天内 / 之后 / 长期。
+ *
+ * `counts.expired` 与 `counts.soon` **只含「过期」那类**（保质期 / 开封后有效期），
+ * 过保（质保期）不在里面 —— 保修到期不等于东西坏了，混进来会稀释真正的提醒。
+ * 所以这个条的总长会小于「有到期日的条目数」，这是刻意的。
+ */
 function severityDist(counts: AlertSummary['counts']): HTMLElement | null {
   const later = Math.max(0, counts.dated - counts.expired - counts.soon);
   const segs: { key: string; label: string; value: number; color: string }[] = [
     { key: 'expired', label: '已过期', value: counts.expired, color: 'var(--danger)' },
-    { key: 'soon', label: '30 天内', value: counts.soon, color: 'var(--warn)' },
+    { key: 'soon', label: `${SOON_TEXT} 天内`, value: counts.soon, color: 'var(--warn)' },
     { key: 'later', label: '之后', value: later, color: 'var(--info)' },
     { key: 'longTerm', label: '长期', value: counts.longTerm, color: 'var(--fg-faint)' },
   ].filter((s) => s.value > 0);
@@ -1090,7 +1188,7 @@ function renderBanner(): void {
   };
 
   if (expired > 0) add(`${expired} 项已过期`, 'danger', () => setTab('groups'));
-  if (soon > 0) add(`${soon} 项 30 天内到期`, 'info', () => setTab('timeline'));
+  if (soon > 0) add(`${soon} 项 ${SOON_TEXT} 天内到期`, 'info', () => setTab('timeline'));
   if (lowStock > 0) add(`${lowStock} 项待补货`, 'info', () => setTab('items'));
   if (a.counts.longTerm > 0) add(`${a.counts.longTerm} 项长期`, 'ghost', () => setTab('groups'));
 }
@@ -1197,7 +1295,7 @@ function renderDashboard(view: HTMLElement): void {
   );
   grid.append(
     card(
-      '30 天内到期',
+      '15 天内到期',
       String(a?.counts.soon ?? 0),
       a && a.counts.soon > 0 ? '该留意了' : '近期没有到期的',
       a && a.counts.soon > 0 ? 'warn' : 'muted',
@@ -1289,11 +1387,11 @@ function itemsTable(items: ItemRow[]): HTMLElement {
 
   const body = el('tbody');
   for (const it of items) {
-    const expired = it.expiry.some((e) => e.expired);
+    const expired = hasExpired(it);
     const tr = el('tr', { class: expired ? 'row-expired' : '' });
 
     const bulk = it.is_bulk === 'true';
-    const worst = it.expiry.find((e) => e.expired) ?? (it.isLongTerm ? undefined : it.expiry[0]);
+    const worst = worstExpire(it);
     const ctx: ColCtx = { worst, bulk };
     for (const c of cols) {
       const cell = c.cell(it, ctx);
@@ -1431,6 +1529,8 @@ function renderGroups(view: HTMLElement): void {
   onlyExpired.append(oeBox, el('span', { text: '只看已过期' }));
   bar.append(onlyExpired);
 
+  bar.append(briefViewToggle());
+
   const collapseAll = el('button', { class: 'ghost small', text: '全部收起' });
   collapseAll.addEventListener('click', () => {
     const all: string[] = [];
@@ -1492,7 +1592,9 @@ function renderGroups(view: HTMLElement): void {
   /** 渲染一个分组节点；没有可显示内容时返回 null */
   function buildGroupNode(node: GroupNode, depth: number): HTMLElement | null {
     let items = node.items;
-    if (state.groupOnlyExpired) items = items.filter((it) => it.expiry.some((e) => e.expired));
+    // 两个筛选互不冲突：简明视图看「该处理的」，只看过期看「已经坏了的」
+    if (state.briefView) items = filterBrief(items);
+    if (state.groupOnlyExpired) items = items.filter((it) => hasExpired(it));
     const kids = node.children.map((c) => buildGroupNode(c, depth + 1)).filter((x): x is HTMLElement => x !== null);
     if (items.length === 0 && kids.length === 0) return null;
 
@@ -1539,7 +1641,9 @@ function renderGroups(view: HTMLElement): void {
     const meta = el('span', { class: 'group-meta' });
     meta.append(el('span', { class: 'muted', text: `${node.count} 项` }));
     if (node.expired) meta.append(el('span', { class: 'badge danger', text: `${node.expired} 已过期` }));
-    if (node.soon) meta.append(el('span', { class: 'badge info', text: `${node.soon} 30 天内` }));
+    if (node.soon) meta.append(el('span', { class: 'badge info', text: `${node.soon} ${SOON_TEXT} 天内` }));
+    // 过保单独标，用中性色 —— 它不是"要马上处理"的事
+    if (node.warranty) meta.append(el('span', { class: 'badge muted', text: `${node.warranty} 过保` }));
     if (node.longTerm) meta.append(el('span', { class: 'muted', text: `${node.longTerm} 长期` }));
     if (node.pinned) meta.append(el('span', { class: 'muted small', text: '置顶 · 不可拖动' }));
     head.append(meta);
@@ -1611,7 +1715,7 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
     tr.append(td(String(i + 1), 'seq muted'));
 
     const bulk = it.is_bulk === 'true';
-    const worst = it.expiry.find((e) => e.expired) ?? (it.isLongTerm ? undefined : it.expiry[0]);
+    const worst = worstExpire(it);
     const ctx: ColCtx = { worst, bulk };
     for (const c of cols) tr.append(c.cell(it, ctx));
 
@@ -2109,13 +2213,30 @@ function itemCols(): ItemCol[] {
           cell.append(inner);
           return cell;
         }
-        inner.append(el('span', { class: 'mono', text: it.expiresOn ?? '' }));
+
+        /**
+         * 显示**最紧迫的那条「过期」**，不是 `expires_on`。
+         *
+         * 两者常常不是一回事：奶粉保质期还剩 20 天，但开封后有效期只剩 3 天 ——
+         * 后者才是要处理的。早先这里固定显示 `expiresOn`，
+         * 结果简明视图把这条筛进来了，列表里却写着"剩 20 天"，看着像筛错了。
+         */
+        const worst = ctx.worst;
+        const on = worst?.expiresOn ?? it.expiresOn ?? '';
+        const leftText = worst?.daysLeftText ?? it.daysLeftText;
+
+        inner.append(el('span', { class: 'mono', text: on }));
         inner.append(
           el('span', {
-            class: `expiry-left ${ctx.worst?.expired ? 'lvl-expired-text' : ctx.worst ? 'lvl-warn-text' : 'muted'}`,
-            text: it.daysLeftText,
+            class: `expiry-left ${worst?.expired ? 'lvl-expired-text' : worst ? 'lvl-warn-text' : 'muted'}`,
+            text: leftText,
           }),
         );
+        // 显示的日期不是「保质期」那条时，标一下是哪来的 —— 否则
+        // 用户按这个日期去翻包装上的保质期会对不上
+        if (worst && worst.kind !== '保质期') {
+          inner.append(el('span', { class: 'expiry-src', text: worst.kind }));
+        }
         cell.append(inner);
         return cell;
       },
@@ -2457,6 +2578,8 @@ function renderItems(view: HTMLElement): void {
   colBtn.addEventListener('click', () => openColumnSettings());
   bar.append(colBtn);
 
+  bar.append(briefViewToggle());
+
   const addBtn = el('button', { class: 'primary', text: '＋ 新增物品' });
   addBtn.addEventListener('click', () => openItemForm(null));
   bar.append(addBtn);
@@ -2484,7 +2607,20 @@ function renderItems(view: HTMLElement): void {
   const colSpan = cols.length + 3;
 
   const body = el('tbody');
-  for (const it of state.items) {
+  // 简明视图：本地筛选，不发请求
+  const shown = state.briefView ? filterBrief(state.items) : state.items;
+  if (shown.length === 0 && state.briefView) {
+    body.append(
+      el(
+        'tr',
+        {},
+        el('td', { class: 'empty', colSpan: String(colSpan) }, el('span', {
+          text: `简明视图里没有东西 —— 没有已过期的，也没有 ${SOON_TEXT} 天内到期的。`,
+        })),
+      ),
+    );
+  }
+  for (const it of shown) {
     const tr = el('tr');
     if (it.lowStock) tr.classList.add('low-stock');
     const bulk = it.is_bulk === 'true';
@@ -2494,7 +2630,7 @@ function renderItems(view: HTMLElement): void {
     tr.append(el('td', { class: 'col-extra' }, extraToggle(it)));
 
     // 第一列：到期状态色点，一眼扫出哪些要处理
-    const worst = it.expiry.find((e) => e.expired) ?? (it.isLongTerm ? undefined : it.expiry[0]);
+    const worst = worstExpire(it);
     tr.append(
       worst
         ? td('●', `dot ${worst.expired ? 'lvl-expired' : 'lvl-warn'}`)

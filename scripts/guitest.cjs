@@ -270,6 +270,103 @@ app.whenReady().then(() => {
       };
     `);
 
+    // ── 3k. 15 天文案 + 过保不报红 ──
+    await ev('03k_窗口文案是15天', `${PRELUDE}
+      need(tab('概览'), '概览页签').click();
+      await wait(1100);
+      const text = $('#view').textContent;
+      const banner = $('#banner-text') ? $('#banner-text').textContent : '';
+      const chips = $$('#banner-chips .chip, #banner-chips span').map(x => x.textContent.trim());
+      return {
+        overviewMentions15: text.includes('15 天'),
+        overviewMentions30: text.includes('30 天'),
+        bannerText: banner.trim().slice(0, 80),
+        chips,
+        distLabels: $$('#view .dist-legend span').map(x => x.textContent.trim()),
+      };
+    `);
+
+    await ev('03l_过保不报红', `${PRELUDE}
+      // 直接问接口：过保数量应当是单独一栏，且 banner 里不出现
+      const a = await window.api.alert.summary(null);
+      const banner = $('#banner-text') ? $('#banner-text').textContent : '';
+      const chips = $$('#banner-chips .chip, #banner-chips span').map(x => x.textContent.trim()).join(' ');
+      return {
+        expired: a.counts.expired,
+        soon: a.counts.soon,
+        warrantyExpired: a.counts.warrantyExpired,
+        headline: a.headline,
+        bannerMentionsWarranty: /过保/.test(banner + ' ' + chips),
+        headlineMentionsWarranty: /过保/.test(a.headline),
+      };
+    `);
+
+    // ── 3m. 简明视图 ──
+    await ev('03m_简明视图开关', `${PRELUDE}
+      need(tab('物品'), '物品页签').click();
+      await wait(1100);
+      const btn = need($('#view .brief-toggle'), '简明视图按钮');
+      const beforeRows = $$('#view tbody tr').length;
+      const beforeText = btn.textContent.trim();
+      btn.click();
+      await wait(1200);
+
+      // 打开后每一行都该是「已过期」或「N 天内到期」
+      const rows = $$('#view tbody tr').filter(tr => tr.querySelector('.extra-toggle'));
+      const names = rows.map(tr => (tr.querySelector('a.link') || {}).textContent);
+      const expiries = rows.map(tr => {
+        const c = tr.querySelector('td.expiry-cell');
+        return c ? c.textContent.replace(/\\s+/g, ' ').trim() : null;
+      });
+      const stillBrief = $('#view .brief-toggle') ? $('#view .brief-toggle').classList.contains('on') : null;
+      return {
+        beforeRows,
+        beforeText,
+        afterRows: rows.length,
+        afterText: $('#view .brief-toggle').textContent.trim(),
+        isOn: stillBrief,
+        sampleExpiries: expiries.slice(0, 6),
+        sampleNames: names.slice(0, 5),
+        // 表头仍然是正常的（不是换了个页面）
+        headers: $$('#view thead th').map(th => th.textContent.trim()).slice(0, 4),
+      };
+    `);
+
+    await ev('03n_关掉简明视图复原', `${PRELUDE}
+      const btn = need($('#view .brief-toggle'), '简明视图按钮');
+      btn.click();
+      await wait(1200);
+      return {
+        isOn: $('#view .brief-toggle').classList.contains('on'),
+        rows: $$('#view tbody tr').filter(tr => tr.querySelector('.extra-toggle')).length,
+        headers: $$('#view thead th').map(th => th.textContent.trim()).slice(0, 4),
+      };
+    `);
+
+    await ev('03o_分组页也有简明视图', `${PRELUDE}
+      need(tab('分组'), '分组页签').click();
+      await wait(1500);
+      const hasBtn = !!$('#view .brief-toggle');
+      const before = $$('#view tr.item-row').length;
+      if (hasBtn) { $('#view .brief-toggle').click(); await wait(1300); }
+      const after = $$('#view tr.item-row').length;
+      // 开着的时候不该有「长期」物品的行 —— 简明视图只剩过期和 15 天内
+      const rows = $$('#view tr.item-row');
+      const expiries = rows.map(tr => {
+        const c = tr.querySelector('td.expiry-cell');
+        return c ? c.textContent.replace(/\\s+/g, ' ').trim() : null;
+      });
+      return {
+        hasBtn,
+        before,
+        after,
+        sampleExpiries: expiries.slice(0, 6),
+        // 收尾：关掉，别影响后面的步骤
+        closed: (() => { const b = $('#view .brief-toggle'); if (b && b.classList.contains('on')) { b.click(); return true; } return false; })(),
+      };
+    `);
+    await wait(900);
+
     // ── 4. 新增：打开表单 ──
     await ev('04_打开新增表单', `${PRELUDE}
       clickButton($('#view'), /新增物品/);

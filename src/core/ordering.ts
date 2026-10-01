@@ -18,7 +18,7 @@
  */
 import type { Row } from './db';
 import { ENUMS } from './fields';
-import { daysUntil } from './dates';
+import { SOON_DAYS, expiriesForItem } from './alerts';
 
 /** 分类留空 = 未分类 */
 export const UNCATEGORIZED = '';
@@ -144,6 +144,13 @@ export interface GroupNode {
   expired: number;
   soon: number;
   longTerm: number;
+  /**
+   * 只有「质保期」到期的物品数。
+   *
+   * 单独一栏而不是并进 `expired`：过保的东西还能用，跟"不能吃了"不是一回事。
+   * 它**不进顶部高亮**，只在组标题上标一下。
+   */
+  warranty: number;
 }
 
 export interface GroupTree {
@@ -210,6 +217,13 @@ export interface GroupOptions {
   sort: SortField;
   /** 每个父路径下的自定义组顺序：path.join('\u0001') → 有序 key 列表 */
   order: Record<string, string[]>;
+  /**
+   * 以哪一天为「今天」算过期 / 快到期。
+   *
+   * 可注入是为了让测试不依赖真实时钟 —— 否则那些用固定日期的用例
+   * 过一段时间就会自己变红，而且很难看出是"测试过期了"还是"代码坏了"。
+   */
+  now?: Date;
 }
 
 /**
@@ -222,6 +236,7 @@ export interface GroupOptions {
  */
 export function buildTree(items: Row[], opts: GroupOptions): GroupTree {
   const levels = Math.max(1, Math.min(3, opts.levels));
+  const now = opts.now ?? new Date();
 
   interface Draft {
     key: string;
@@ -311,16 +326,30 @@ export function buildTree(items: Row[], opts: GroupOptions): GroupTree {
     let expired = 0;
     let soon = 0;
     let longTerm = 0;
+    let warranty = 0;
 
+    /**
+     * 数一件物品属于哪一档。
+     *
+     * 只看「过期」那类来源（保质期 / 开封后有效期）：
+     * 质保期到了算**过保**，单独数，不进 expired / soon。
+     * 一件东西可能既有保质期又有质保期，取最坏的那条决定它算不算过期。
+     */
     const tally = (r: Row): void => {
-      const e = r['expires_on'] ? String(r['expires_on']) : '';
-      if (!e) {
+      const all = expiriesForItem(r, now);
+      if (all.length === 0) {
         longTerm += 1;
         return;
       }
-      const left = daysUntil(e) ?? 0;
-      if (left < 0) expired += 1;
-      else if (left <= 30) soon += 1;
+      // 有到期日但全是质保期 → 它在分组树里不算「长期」（确实有日期要记），
+      // 也不进 alert 计数
+      const expiring = all.filter((e) => e.alertKind === 'expire');
+      if (expiring.length === 0) {
+        warranty += 1;
+        return;
+      }
+      if (expiring.some((e) => e.expired)) expired += 1;
+      else if (expiring.some((e) => e.daysLeft <= SOON_DAYS)) soon += 1;
     };
 
     for (const r of ownItems) tally(r);
@@ -329,6 +358,7 @@ export function buildTree(items: Row[], opts: GroupOptions): GroupTree {
       expired += c.expired;
       soon += c.soon;
       longTerm += c.longTerm;
+      warranty += c.warranty;
     }
 
     return {
@@ -343,6 +373,7 @@ export function buildTree(items: Row[], opts: GroupOptions): GroupTree {
       expired,
       soon,
       longTerm,
+      warranty,
     };
   };
 

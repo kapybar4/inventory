@@ -55,6 +55,7 @@ import {
   categoryLabel,
   lowStockItems,
   leadDaysFor,
+  SOON_DAYS,
 } from '../core/alerts';
 import {
   addStock,
@@ -1412,8 +1413,9 @@ function cmdItemList(args: ParsedArgs, dataDir: string): number {
         const indent = 2 + depth * 2;
         const meta: string[] = [`${node.count} 项`];
         if (node.expired) meta.push(`${node.expired} 已过期`);
-        if (node.soon) meta.push(`${node.soon} 30 天内`);
+        if (node.soon) meta.push(`${node.soon} ${SOON_DAYS} 天内`);
         if (node.longTerm) meta.push(`${node.longTerm} 长期`);
+        if (node.warranty) meta.push(`${node.warranty} 过保`);
         if (node.pinned) meta.push('置顶·不可拖动');
 
         printSection(
@@ -1665,7 +1667,14 @@ function cmdItemShow(args: ParsedArgs, dataDir: string): number {
       workspaceId: entry.id,
       item,
       expiry,
-      expiryLabel: expiry.length === 0 ? '长期' : expiry.some((e) => e.expired) ? '已过期' : '在有效期内',
+      expiryLabel:
+        expiry.length === 0
+          ? '长期'
+          : expiry.some((e) => e.alertKind === 'expire' && e.expired)
+            ? '已过期'
+            : expiry.some((e) => e.alertKind === 'warranty' && e.expired)
+              ? '已过保'
+              : '在有效期内',
       lowStock: minStock > 0 && remaining < minStock,
       stocks,
       stockTotals: stocks.length > 0 ? totals : null,
@@ -1715,7 +1724,7 @@ function cmdItemShow(args: ParsedArgs, dataDir: string): number {
         { title: '类型', get: (e) => e.kind, max: 14 },
         { title: '到期日', get: (e) => e.expiresOn, max: 12 },
         { title: '剩余', get: (e) => e.daysLeftText, max: 16 },
-        { title: '状态', get: (e) => (e.expired ? '已过期' : '在有效期内'), max: 12 },
+        { title: '状态', get: (e) => (e.expired ? (e.alertKind === 'warranty' ? '已过保' : '已过期') : '在有效期内'), max: 12 },
       ]);
     }
 
@@ -2163,6 +2172,8 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
           .filter((e) => !onlyExpired || e.expired)
           .map((e) => ({
             expiryKind: e.kind,
+            /** 这条算「过期」还是「过保」 */
+            alertKind: e.alertKind,
             expiresOn: e.expiresOn,
             daysLeft: e.daysLeft,
             daysLeftText: e.daysLeftText,
@@ -2210,8 +2221,11 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
   );
 
   const counts = {
-    expired: allEntries.filter((e) => e.expired).length,
-    soon: allEntries.filter((e) => !e.expired && e.daysLeft <= 30).length,
+    // 只数「过期」那类（保质期 / 开封后有效期）；过保单独统计，不并进来
+    expired: allEntries.filter((e) => e.alertKind === 'expire' && e.expired).length,
+    soon: allEntries.filter((e) => e.alertKind === 'expire' && !e.expired && e.daysLeft <= SOON_DAYS).length,
+    /** 已过保的条目数。不进 headline、不进高亮 */
+    warrantyExpired: allEntries.filter((e) => e.alertKind === 'warranty' && e.expired).length,
     dated: allEntries.length,
     longTerm: flatGroups.reduce((n, g) => n + g.longTerm.length, 0),
     lowStock: lowStock.length,
@@ -2236,8 +2250,15 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
   for (const g of flatGroups) {
     printed = true;
     const title = entries.length > 1 ? `${g.workspaceName} · ${g.label}` : g.label;
-    const expiredN = g.entries.filter((e) => e.expired).length;
-    printSection(title, `${g.entries.length} 项${expiredN ? ` · ${expiredN} 已过期` : ''}`);
+    // 过期 / 15 天内只数「过期」那类；过保单独标，用不同的说法
+    const expiredN = g.entries.filter((e) => e.alertKind === 'expire' && e.expired).length;
+    const soonN = g.entries.filter((e) => e.alertKind === 'expire' && !e.expired && e.daysLeft <= SOON_DAYS).length;
+    const warrantyN = g.entries.filter((e) => e.alertKind === 'warranty' && e.expired).length;
+    const meta = [`${g.entries.length} 项`];
+    if (expiredN) meta.push(`${expiredN} 已过期`);
+    if (soonN) meta.push(`${soonN} ${SOON_DAYS} 天内`);
+    if (warrantyN) meta.push(`${warrantyN} 过保`);
+    printSection(title, meta.join(' · '));
 
     if (g.entries.length > 0) {
       printTable(
@@ -2247,7 +2268,7 @@ function cmdAlertList(args: ParsedArgs, dataDir: string): number {
           { title: '名称', get: (e) => e.itemName, max: 40 },
           { title: '到期日', get: (e) => e.expiresOn, max: 12 },
           { title: '剩余时间', get: (e) => e.daysLeftText, max: 14 },
-          { title: '状态', get: (e) => (e.expired ? '已过期' : ''), max: 8 },
+          { title: '状态', get: (e) => (e.expired ? (e.alertKind === 'warranty' ? '已过保' : '已过期') : ''), max: 8 },
           { title: '数量', get: (e) => (e.isBulk ? String(e.remaining) : '1'), align: 'right', max: 6 },
           { title: '位置', get: (e) => e.location, max: 24 },
           { title: '物品UUID', get: (e) => e.itemUuid, max: 36 },
@@ -2457,10 +2478,18 @@ function cmdGroupList(args: ParsedArgs, dataDir: string): number {
         stockCount: counts.get(String(r['uuid'])) ?? 0,
         lowStock: minStock > 0 && remaining < minStock,
         expiresOn,
+        warrantyUntil: r['warranty_until'] ? String(r['warranty_until']) : null,
+        spec: r['spec'] ?? null,
+        notes: r['notes'] ?? null,
         daysLeft: expiresOn ? (daysUntil(expiresOn) ?? 0) : null,
         daysLeftText: expiresOn ? formatDaysLeft(daysUntil(expiresOn)) : '长期',
         isLongTerm: e.length === 0,
-        expired: e.some((x) => x.expired),
+        // `expired` 指的是「过期」那类（保质期 / 开封后有效期）。
+        // 别用 e.some(x => x.expired)：那会把过保也算进来，
+        // 跟告警计数（只数过期）就对不上了。
+        expired: e.some((x) => x.alertKind === 'expire' && x.expired),
+        /** 只过保 */
+        warrantyExpired: e.some((x) => x.alertKind === 'warranty' && x.expired),
         location: [r['room'], r['container']].filter(Boolean).join(' / '),
       };
     };
@@ -2475,6 +2504,7 @@ function cmdGroupList(args: ParsedArgs, dataDir: string): number {
       expired: n.expired,
       soon: n.soon,
       longTerm: n.longTerm,
+      warranty: n.warranty,
       items: n.items.map(decorate),
       children: n.children.map(toJson),
     });
@@ -2511,8 +2541,9 @@ function cmdGroupList(args: ParsedArgs, dataDir: string): number {
     const printNode = (n: (typeof tree.nodes)[number], depth: number): void => {
       const meta: string[] = [`${n.count} 项`];
       if (n.expired) meta.push(`${n.expired} 已过期`);
-      if (n.soon) meta.push(`${n.soon} 30 天内`);
+      if (n.soon) meta.push(`${n.soon} ${SOON_DAYS} 天内`);
       if (n.longTerm) meta.push(`${n.longTerm} 长期`);
+      if (n.warranty) meta.push(`${n.warranty} 过保`);
       if (n.pinned) meta.push('置顶·不可拖动');
 
       printSection(`${'· '.repeat(depth)}${n.label}`, meta.join(' · '));
@@ -3300,7 +3331,7 @@ function printHelp(): void {
   write('  dsh-inv item consume MED-0001            # 消耗掉（数量归 0）');
   write('  dsh-inv item consume DEV-0001 --qty 3    # 批量物品领用 3 个');
   write('  dsh-inv item purge --dry-run            # 看哪些「已消耗完」的能清掉');
-  write('  dsh-inv alert list --within 30');
+  write(`  dsh-inv alert list --within ${SOON_DAYS}`);
   write('  dsh-inv export -o D:\\备份\\家当.zip');
   write('  dsh-inv import D:\\备份\\家当.zip --name "父母家"');
   write('  dsh-inv item add --json-file 购物清单.json');

@@ -60,6 +60,13 @@ import {
   leadDaysFor,
   lowStockItems,
   categoryLabel,
+  classifyKind,
+  isSoon,
+  worstExpireEntry,
+  SOON_DAYS,
+  KIND_SHELF_LIFE,
+  KIND_WARRANTY,
+  KIND_OPENED,
 } from '../core/alerts';
 import { monthEnd, resolveExpiresOn, daysBetween, daysUntil, addMonths, addDays, isDateString, isYearMonth, today } from '../core/dates';
 import { parseCsv, serializeCsv, cellToRaw, rawToCell } from '../core/csv';
@@ -1267,11 +1274,11 @@ test('已过期的排在组内最前，并被标记 expired', () => {
   assert.equal(g.counts.expired, 1);
 });
 
-test('概览只在计数里保留「已过期 / 30 天内 / 长期 / 待补货」，没有分级字段', () => {
+test('概览计数：过期 / 15 天内 / 长期 / 待补货，没有分级字段', () => {
   const now = new Date(2026, 0, 1);
   const items = [
     { uuid: 'a', name: '过期', category: 'medicine', remaining: '1', expires_on: '2025-12-01' },
-    { uuid: 'b', name: '快到了', category: 'medicine', remaining: '1', expires_on: '2026-01-20' },
+    { uuid: 'b', name: '快到了', category: 'medicine', remaining: '1', expires_on: '2026-01-10' },
     { uuid: 'c', name: '还早', category: 'medicine', remaining: '1', expires_on: '2027-01-01' },
     { uuid: 'd', name: '长期', category: 'medicine', remaining: '1' },
     { uuid: 'e', name: '要补货', category: 'daily', remaining: '1', min_stock: '5' },
@@ -1279,13 +1286,134 @@ test('概览只在计数里保留「已过期 / 30 天内 / 长期 / 待补货�
   const s = summarizeOverview(asRows(items), { id: 'w', name: 'w' }, now);
 
   assert.equal(s.counts.expired, 1);
-  assert.equal(s.counts.soon, 1, '20 天后到期，算 30 天内');
+  assert.equal(s.counts.soon, 1, '9 天后到期，算 15 天内');
   assert.equal(s.counts.dated, 3, '三条有到期日');
   assert.equal(s.counts.longTerm, 2, '「长期」和没填到期日的「要补货」都算长期');
   assert.equal(s.counts.lowStock, 1);
   assert.match(s.headline, /已过期/);
+  assert.match(s.headline, /15 天内到期/, '文案要说 15 天');
   // 旧的分级字段不该再出现
   assert.ok(!('expired' in s && Array.isArray((s as unknown as Record<string, unknown>)['expired'])));
+});
+
+test('窗口是 15 天：第 16 天不算，第 15 天算', () => {
+  const now = new Date(2026, 0, 1);
+  const mk = (name: string, on: string) => ({ uuid: name, name, category: 'daily', remaining: '1', expires_on: on });
+  const s = summarizeOverview(
+    asRows([mk('十四天', '2026-01-15'), mk('十五天', '2026-01-16'), mk('十六天', '2026-01-17')]),
+    { id: 'w', name: 'w' },
+    now,
+  );
+  assert.equal(SOON_DAYS, 15, '窗口就是 15 天');
+  assert.equal(s.counts.soon, 2, '14 天和 15 天各算一条，16 天不算');
+});
+
+test('过保不计入「已过期」与「15 天内到期」', () => {
+  const now = new Date(2026, 0, 1);
+  const items = [
+    // 只有质保期，且已经过了
+    { uuid: 'w1', name: '过保的鼠标', category: 'digital', remaining: '1', warranty_until: '2025-06-01' },
+    // 只有质保期，快到了
+    { uuid: 'w2', name: '快过保的路由器', category: 'digital', remaining: '1', warranty_until: '2026-01-10' },
+    // 真的过期
+    { uuid: 'e1', name: '过期的药', category: 'medicine', remaining: '1', expires_on: '2025-12-01' },
+    // 快到期的药
+    { uuid: 'e2', name: '快过期的药', category: 'medicine', remaining: '1', expires_on: '2026-01-10' },
+  ];
+  const s = summarizeOverview(asRows(items), { id: 'w', name: 'w' }, now);
+
+  assert.equal(s.counts.expired, 1, '只有药算过期，过保的鼠标不算');
+  assert.equal(s.counts.soon, 1, '只有药算 15 天内，快过保的不算');
+  assert.equal(s.counts.warrantyExpired, 1, '过保单列一项');
+  // headline 是高亮用的，过保不该出现
+  assert.ok(!/过保/.test(s.headline), `headline 不该提过保：${s.headline}`);
+  assert.match(s.headline, /1 项已过期/);
+  assert.match(s.headline, /1 项 15 天内到期/);
+});
+
+test('一件东西既有保质期又有质保期时，按各自来源分别归类', () => {
+  const now = new Date(2026, 0, 1);
+  const items = [
+    {
+      uuid: 'both',
+      name: '既有保质期也有质保',
+      category: 'digital',
+      remaining: '1',
+      expires_on: '2026-01-10', // 快过期
+      warranty_until: '2025-01-01', // 已过保
+    },
+  ];
+  const s = summarizeOverview(asRows(items), { id: 'w', name: 'w' }, now);
+  assert.equal(s.counts.soon, 1, '保质期那条算 15 天内');
+  assert.equal(s.counts.expired, 0, '质保期那条不算过期');
+  assert.equal(s.counts.warrantyExpired, 1, '质保期那条算过保');
+});
+
+test('开封后有效期算「过期」，质保期算「过保」', () => {
+  assert.equal(classifyKind(KIND_SHELF_LIFE), 'expire');
+  assert.equal(classifyKind(KIND_OPENED), 'expire', '开封后有效期是"不能用了"，算过期');
+  assert.equal(classifyKind(KIND_WARRANTY), 'warranty');
+});
+
+test('worstExpireEntry 不看质保期 —— 只有质保期的物品不报红', () => {
+  const now = new Date(2026, 0, 1);
+  const warrantyOnly = asRows([
+    { uuid: 'w', name: '只有质保', category: 'digital', remaining: '1', warranty_until: '2025-01-01' },
+  ])[0]!;
+  assert.equal(worstExpireEntry(warrantyOnly, now), undefined, '过保不该产生"最坏条目"');
+
+  const both = asRows([
+    {
+      uuid: 'b',
+      name: '两个都有',
+      category: 'digital',
+      remaining: '1',
+      expires_on: '2026-01-10',
+      warranty_until: '2025-01-01',
+    },
+  ])[0]!;
+  const worst = worstExpireEntry(both, now);
+  assert.equal(worst?.kind, KIND_SHELF_LIFE, '要挑保质期那条，不是质保期');
+});
+
+test('isSoon 只认「过期」类且不认已过期', () => {
+  const now = new Date(2026, 0, 1);
+  const rows = asRows([
+    { uuid: 'a', name: '快过期', category: 'daily', remaining: '1', expires_on: '2026-01-10' },
+    { uuid: 'b', name: '已过期', category: 'daily', remaining: '1', expires_on: '2025-12-01' },
+    { uuid: 'c', name: '快过保', category: 'daily', remaining: '1', warranty_until: '2026-01-10' },
+    { uuid: 'd', name: '已过保', category: 'daily', remaining: '1', warranty_until: '2025-12-01' },
+  ]);
+  const soon = rows.flatMap((r) => expiriesForItem(r, now)).filter((e) => isSoon(e));
+  assert.equal(soon.length, 1, '只有"快过期"那条');
+  assert.equal(soon[0]!.kind, KIND_SHELF_LIFE);
+});
+
+test('分组树的过保单独数，不进 expired / soon', () => {
+  const items = asRows([
+    { uuid: 'a', name: '过保', category: 'digital', remaining: '1', warranty_until: '2025-01-01' },
+    { uuid: 'b', name: '过期', category: 'digital', remaining: '1', expires_on: '2025-01-01' },
+    { uuid: 'c', name: '快过期', category: 'digital', remaining: '1', expires_on: '2026-01-10' },
+    { uuid: 'd', name: '长期', category: 'digital', remaining: '1' },
+  ]);
+  const tree = buildTree(items, { levels: 1, sort: 'manual', order: {}, now: new Date(2026, 0, 1) });
+  const node = tree.nodes.find((n) => n.key === 'digital')!;
+  assert.equal(node.expired, 1, '只有"过期"那条');
+  assert.equal(node.soon, 1, '只有"快过期"那条');
+  assert.equal(node.warranty, 1, '过保单独数');
+  assert.equal(node.longTerm, 1, '长期只算真的没有到期日的');
+});
+
+test('只有质保期的物品不算「长期」，但也不进提醒', () => {
+  const items = asRows([
+    { uuid: 'w', name: '只有质保', category: 'digital', remaining: '1', warranty_until: '2030-01-01' },
+  ]);
+  const tree = buildTree(items, { levels: 1, sort: 'manual', order: {}, now: new Date(2026, 0, 1) });
+  const node = tree.nodes.find((n) => n.key === 'digital')!;
+  // 它确实有日期要记，所以不算"长期"；但也不报红、不报快到期
+  assert.equal(node.longTerm, 0, '有质保日期就不算长期');
+  assert.equal(node.expired, 0);
+  assert.equal(node.soon, 0);
 });
 
 test('待补货只认设了最低库存的物品', () => {

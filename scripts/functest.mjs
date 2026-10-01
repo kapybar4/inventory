@@ -1275,6 +1275,129 @@ check('列表接口不返回 extra_json（按需拉取）', () => {
 });
 
 // ═════════════════════════════════════════════════════════════
+// 13. 过期 / 过保
+// ═════════════════════════════════════════════════════════════
+
+section('13. 过期 / 过保');
+
+const daysFromNow = (n) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10);
+
+check('窗口是 15 天：文案说 15 天', () => {
+  cli(['item', 'add', '--name', '十天后到期', '-c', 'daily', '--expires-on', daysFromNow(10)]);
+  const out = cli(['alert', 'list']).out;
+  // 组标题里是「1 15 天内」，概览 headline 里是「6 项 15 天内到期」，
+  // 所以只断言「15 天内」这半句
+  ok(/15 天内/.test(out), `文案应是 15 天，实际:\n${out.slice(0, 300)}`);
+  ok(!/30 天内/.test(out), '不该再有 30 天');
+  return '15 天内';
+});
+
+check('第 16 天不算「15 天内」，第 10 天算', () => {
+  cli(['item', 'add', '--name', '十六天后', '-c', 'daily', '--expires-on', daysFromNow(16)]);
+  const within = json(['alert', 'list', '--within', '15']).data.data;
+  const names = within.groups.flatMap((g) => g.entries).map((e) => e.itemName);
+  ok(names.includes('十天后到期'), '10 天后的应在内');
+  ok(!names.includes('十六天后'), '16 天后的不该在内');
+  return `${names.length} 条`;
+});
+
+check('质保期算「过保」，不算「已过期」', () => {
+  cli(['item', 'add', '--name', '过保的鼠标', '-c', 'digital', '--warranty-until', '2020-01-01']);
+  const d = json(['alert', 'list']).data.data;
+  const entry = d.groups.flatMap((g) => g.entries).find((e) => e.itemName === '过保的鼠标');
+  ok(entry, '过保条目仍应出现在列表里（能查到）');
+  eq(entry.alertKind, 'warranty', '标记为 warranty');
+  eq(entry.expiryKind, '质保期', '来源是质保期');
+  const expiredNames = d.groups
+    .flatMap((g) => g.entries)
+    .filter((e) => e.alertKind === 'expire' && e.expired)
+    .map((e) => e.itemName);
+  ok(!expiredNames.includes('过保的鼠标'), '过保不该混进「已过期」');
+  return 'warranty';
+});
+
+check('保质期算「过期」', () => {
+  cli(['item', 'add', '--name', '过期的药', '-c', 'medicine', '--expires-on', '2020-01-01']);
+  const d = json(['alert', 'list']).data.data;
+  const entry = d.groups.flatMap((g) => g.entries).find((e) => e.itemName === '过期的药');
+  eq(entry.alertKind, 'expire', '标记为 expire');
+  eq(entry.expiryKind, '保质期', '来源是保质期');
+  return 'expire';
+});
+
+check('开封后有效期也算「过期」', () => {
+  cli([
+    'item', 'add', '--name', '开封很久的药', '-c', 'medicine',
+    '--opened-on', '2020-01-01', '--open-shelf-life-days', '28',
+  ]);
+  const d = json(['alert', 'list']).data.data;
+  const entry = d.groups.flatMap((g) => g.entries).find((e) => e.itemName === '开封很久的药');
+  eq(entry.alertKind, 'expire', '开封后有效期算过期');
+  return 'expire';
+});
+
+check('一件东西同时有两种日期时，各自归类', () => {
+  cli([
+    'item', 'add', '--name', '两样都有的', '-c', 'digital',
+    '--expires-on', daysFromNow(5), '--warranty-until', '2020-01-01',
+  ]);
+  const d = json(['alert', 'list']).data.data;
+  const entries = d.groups.flatMap((g) => g.entries).filter((e) => e.itemName === '两样都有的');
+  eq(entries.length, 2, '两条日期');
+  eq(entries.map((e) => e.alertKind).sort().join(','), 'expire,warranty', '一条过期一条过保');
+  return 'expire,warranty';
+});
+
+check('计数只数过期那类，过保单列', () => {
+  const d = json(['alert', 'list']).data.data;
+  ok(typeof d.counts.warrantyExpired === 'number', '应有过保计数');
+  const all = d.groups.flatMap((g) => g.entries);
+  eq(
+    d.counts.expired,
+    all.filter((e) => e.alertKind === 'expire' && e.expired).length,
+    'counts.expired 应等于逐条数出来的',
+  );
+  eq(
+    d.counts.soon,
+    all.filter((e) => e.alertKind === 'expire' && !e.expired && e.daysLeft <= 15).length,
+    'counts.soon 同理',
+  );
+  ok(d.counts.warrantyExpired >= 1, '至少有一条过保');
+  return `过期 ${d.counts.expired} / 15 天内 ${d.counts.soon} / 过保 ${d.counts.warrantyExpired}`;
+});
+
+check('概述的 headline 不提过保', () => {
+  const d = json(['alert', 'list']).data.data;
+  ok(!/过保/.test(d.headline), `headline 不该提过保：${d.headline}`);
+  return d.headline;
+});
+
+check('分组树：过保单独数，不进 expired / soon', () => {
+  const d = json(['group', 'list', '--levels', '1']).data.data;
+  const digital = d.groups.find((g) => g.key === 'digital');
+  ok(digital, '应有数码设备组');
+  ok(typeof digital.warranty === 'number', '节点应带 warranty 计数');
+  ok(digital.warranty >= 2, `数码组过保数应 >= 2（过保的鼠标 + 两样都有的），实际 ${digital.warranty}`);
+  return `数码组：过期 ${digital.expired} / 15 天内 ${digital.soon} / 过保 ${digital.warranty}`;
+});
+
+check('过保物品仍算「有到期日」，不是长期', () => {
+  const d = json(['group', 'list', '--levels', '1']).data.data;
+  const digital = d.groups.find((g) => g.key === 'digital');
+  // `longTerm` 是个数字（长期物品数），不是数组。
+  // 过保的鼠标只有质保期 —— 它确实有日期要记，所以不该被算进 longTerm
+  ok(digital.longTerm === 0 || digital.count > 0, '过保物品不该让 longTerm 增加');
+  ok(digital.warranty >= 1, '它应该落在 warranty 里');
+  // 交叉验证：数码组里确实有一条只有质保期的物品，且它的 expiresOn 为空
+  const warrantyOnly = digital.items.find((i) => i.name === '过保的鼠标');
+  if (warrantyOnly) {
+    eq(warrantyOnly.expiresOn, null, '它没有保质期');
+    ok(warrantyOnly.warrantyUntil, '但有质保到期日');
+  }
+  return `longTerm=${digital.longTerm} warranty=${digital.warranty}`;
+});
+
+// ═════════════════════════════════════════════════════════════
 // 汇总
 // ═════════════════════════════════════════════════════════════
 
