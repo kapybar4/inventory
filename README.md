@@ -25,8 +25,8 @@ npm.cmd start                # 桌面界面（可选）
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 67 项单元测试
-npm.cmd run test:func   # 99 项 CLI 功能测试
+npm.cmd test            # 77 项单元测试
+npm.cmd run test:func   # 112 项 CLI 功能测试
 ```
 
 > **Windows 注意**：如果执行策略禁止 `npm.ps1`，请用 `npm.cmd`
@@ -250,7 +250,8 @@ dsh-inv group list --order '=daily,medicine'   # 固定第一层的组顺序（�
 | --- | --- | --- |
 | **物品** | 名称 + 处方/批量/长期标记 | ✗ |
 | **到期时间** | 到期日 + 剩余时间，同一格上下两行 | ✗ |
-| 分类 / 品牌 / 型号 / 位置 / 数量 / 购买日期 | 各自一列 | ✓ |
+| 分类 / 品牌 / 型号 / 数量 / 购买日期 | 各自一列 | ✓ |
+| 位置 / 规格 / 备注 | 默认**不显示**，收在展开区里 | ✓（可手动打开） |
 
 **「剩余时间」不是独立一列**，它是`到期日 − 今天`**算出来的**：
 
@@ -277,6 +278,59 @@ dsh-inv column set --show-all                # 全部打开
 范围是物品页、分组页、概览页的「最先到期」—— 三处是同一份物品清单，
 列不一致会让人以为看到的是不同的数据。概览页的「待补货」表**不**跟随：
 它只有 5 列且与到期无关，硬套一套跟它没关系的配置反而奇怪。
+
+### 展开区：点一下才显示的那些信息
+
+表格每行最左边有个小箭头，**点开才在行下方铺开**该物品的补充信息。
+默认只占一个箭头的宽度 —— 大多数时候你只想扫一眼"什么东西、什么时候过期"。
+
+展开后能看到并直接改：
+
+| 固定三项 | 说明 |
+| --- | --- |
+| **位置** | 拆成「房间」和「容器 / 柜格」两格写 |
+| **规格** | 选填 |
+| **备注** | 多行 |
+
+**外加任意条这件东西自己的字段。** 空调记「滤网型号」、保单记「保单号」、
+净水器记「滤芯到期」—— 每件东西要记的附加信息各不相同，
+为这个去给数据库加列不划算，所以存在一个**扁平 JSON** 里（`items.extra_json`）。
+
+「扁平」是硬约束：值只能是字符串，**不允许嵌套**。嵌套之后界面上就得做递归编辑器，
+而实际要记的东西就是"滤网型号 = M8R-FLP"这种一行一条。限制住形状，
+校验简单、界面简单、导出还是一格 CSV。
+
+- 改动**离开输入框就自动保存**，没有"保存"按钮 ——
+  展开区本来就是随手记一笔的地方，多一步确认只会让人不想用
+- 值清空 = 删除该字段（自定义字段连字段名一起没）
+- 按 Enter 提交（备注是多行，用 Ctrl+Enter）
+
+#### 位置 / 规格 / 备注为什么仍然是真实字段
+
+它们**没有**被塞进那个 JSON。看起来"都是补充信息，放一起不就行了"，
+但这三个要参与：
+
+- 位置 → 分组、按位置排序
+- 规格 → 导出、搜索
+- 备注 → 导出
+
+变成 JSON 之后这些全都要重写，而收益只有"少三列"。所以它们是真实列，
+**展开区只是它们统一的使用入口**。自定义字段才是真正进 JSON 的那些。
+
+这也意味着：在展开区改「规格」，物品表打开「规格」列时会同步变 ——
+因为改的就是同一个地方。
+
+```bash
+dsh-inv item extra 空调                                  # 查看
+dsh-inv item extra 空调 滤网型号 M8R-FLP                  # 加/改一个字段
+dsh-inv item extra 空调 滤网型号 ''                        # 删掉它
+dsh-inv item extra 空调 room 客厅                         # 位置分两格写
+dsh-inv item extra 空调 --set '{"a":"1"}'                 # 整份替换
+dsh-inv item add --name 空调 -c digital --extra '{"滤网型号":"M8R-FLP"}'
+```
+
+关于导出的一个细节：JSON 的**键会按字典序重排**后再存。
+不然同一份内容因为键的顺序不同就会得到不同字符串，"往返后逐字相等"这条就验不了。
 
 ### 「一组库存」：批量物品的嵌套条目
 
@@ -443,6 +497,7 @@ dsh-inv init [--name 名称] [--no-seed]        初始化数据目录与第一�
   item update <uuid|code> [字段选项]          修改字段（含数量、到期日、价格）
   item consume <uuid|code> [--qty N]          消耗 / 领用 / 丢弃 / 过期处理
   item reorder <物品>... [--after <物品>]     固定物品在默认状态下的位置（等于拖动）
+  item extra <物品> [<字段> <值>]            补充信息：位置/规格/备注 + 自定义字段
   item stock <list|add|rm> <物品>             管理批量物品的「一组库存」
   item purge [--dry-run] [--yes]              一键清理「已消耗完」的普通物品
   item rm <uuid|code> [更多...] --yes         删除记录（连带流水）
@@ -721,9 +776,10 @@ src/
 │   ├── alerts.ts            到期来源汇总、提醒窗口、分类分组
 │   ├── ordering.ts          分组树（三级）、排序字段、手动顺序
 │   ├── columns.ts           可配置列清单 + resolveColumns（锁定列兜底）
+│   │                        展开区固定项（位置/规格/备注）
 │   ├── bulk.ts              「一组库存」子行、FEFO 领用、父项汇总
 │   ├── dates.ts             日期、月末折算、剩余天数
-│   ├── values.ts            类型校验与归一（写入层与导入层共用同一份）
+│   ├── values.ts            类型校验与归一；补充信息（扁平 JSON）的解析与规范化
 │   ├── zip.ts               调用系统 tar.exe（libarchive，UTF-8 名字不乱码）
 │   ├── seed.ts              演示数据（刻意覆盖各种到期情况）
 │   └── ids.ts / util.ts / meta.ts
@@ -733,7 +789,7 @@ src/
 ├── main/main.ts             Electron 主进程：IPC 白名单，不含领域逻辑
 ├── preload/preload.ts       contextBridge，具名方法白名单
 ├── renderer/                index.html + app.ts + styles.css（零依赖原版 TS）
-└── test/core.test.ts        67 项：往返不变式、日期、CSV、隔离、批量、分组排序、回归
+└── test/core.test.ts        77 项：往返不变式、日期、CSV、隔离、批量、分组排序、回归
 scripts/build.mjs            编译 + 搬运静态资源
 ```
 
@@ -745,9 +801,9 @@ scripts/build.mjs            编译 + 搬运静态资源
 
 ```
 npm.cmd run typecheck   # 主进程/CLI/core + 渲染层，两套 tsconfig
-npm.cmd test            # 67 项单元测试（不变量 + 回归）
-npm.cmd run test:func   # 89 项 CLI/数据层功能测试（真跑命令、核对输出）
-npm.cmd run test:gui    # 24 步桌面端走查（真开 Electron，读 DOM）
+npm.cmd test            # 77 项单元测试（不变量 + 回归）
+npm.cmd run test:func   # 112 项 CLI/数据层功能测试（真跑命令、核对输出）
+npm.cmd run test:gui    # 29 步桌面端走查（真开 Electron，读 DOM）
 npm.cmd run test:all    # 单元 + 功能
 ```
 

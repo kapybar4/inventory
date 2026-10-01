@@ -84,8 +84,168 @@ import {
   isMinimal,
   resolveColumns,
 } from '../core/columns';
+import {
+  mergeExtra,
+  parseExtra,
+  serializeExtra,
+} from '../core/values';
 import { updateWorkspacePrefs } from '../core/workspace';
 import { exportTableColumns } from './_helpers';
+
+// ═════════════════════════════════════════════════════════════
+// 补充信息（extra_json）
+// ═════════════════════════════════════════════════════════════
+
+test('补充信息：解析、规范化、键按字典序', () => {
+  assert.deepEqual(parseExtra('{"b":"2","a":"1"}'), { b: '2', a: '1' });
+  assert.deepEqual(parseExtra(null), {});
+  assert.deepEqual(parseExtra(''), {});
+  assert.deepEqual(parseExtra('{}'), {});
+
+  // 键排序后再序列化 —— 否则同一份内容会得到不同字符串，
+  // 往返比较就会"看起来变了"
+  assert.equal(serializeExtra({ b: '2', a: '1' }), '{"a":"1","b":"2"}');
+  assert.equal(serializeExtra({ a: '1', b: '2' }), '{"a":"1","b":"2"}');
+  // 空对象 → null，库里不留两种空
+  assert.equal(serializeExtra({}), null);
+});
+
+test('补充信息：值一律转成字符串，非字符串的键被拒', () => {
+  const obj = parseExtra('{"数量":3,"在用":true}');
+  assert.equal(obj['数量'], '3');
+  assert.equal(obj['在用'], 'true');
+
+  assert.throws(() => parseExtra('{"嵌套":{"a":1}}'), /嵌套/, '不允许嵌套');
+  assert.throws(() => parseExtra('{"列表":[1,2]}'), /嵌套/, '数组也算嵌套');
+  assert.throws(() => parseExtra('不是 json'), /JSON/);
+});
+
+test('补充信息：必须是对象，不能是数组或标量', () => {
+  assert.throws(() => parseExtra('[1,2,3]'), /JSON 对象/);
+  assert.throws(() => parseExtra('"字符串"'), /JSON 对象/);
+  assert.throws(() => parseExtra('123'), /JSON 对象/);
+});
+
+test('补充信息：写入层会归一（键序固定），往返才稳', () => {
+  withWorkspace('w', 'ws_extra', (dataDir, entry) => {
+    const db = openDatabase(workspaceDbPath(dataDir, entry));
+    try {
+      // 故意用乱序的键写两次，库里应当完全一样
+      const a = insertRow(db, 'items', { code: 'E-1', name: '空调', extra_json: '{"滤网型号":"M8R-FLP","安装日":"2025-06"}' });
+      const b = insertRow(db, 'items', { code: 'E-2', name: '空调二号', extra_json: '{"安装日":"2025-06","滤网型号":"M8R-FLP"}' });
+      assert.equal(a['extra_json'], b['extra_json'], '键序不同的同一份内容应归一成同一个字符串');
+      assert.equal(a['extra_json'], '{"安装日":"2025-06","滤网型号":"M8R-FLP"}');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test('补充信息：也接受直接传对象', () => {
+  withWorkspace('w', 'ws_extra2', (dataDir, entry) => {
+    const db = openDatabase(workspaceDbPath(dataDir, entry));
+    try {
+      const it = insertRow(db, 'items', {
+        code: 'E-3',
+        name: '保单',
+        // 界面直接传对象，比让人拼 JSON 字符串友好
+        extra_json: { 保单号: 'P-2024-001', 报修电话: '95500' } as unknown as string,
+      });
+      const parsed = parseExtra(it['extra_json'] as string);
+      assert.equal(parsed['保单号'], 'P-2024-001');
+      assert.equal(parsed['报修电话'], '95500');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test('补充信息：非法的值被写入层拦住', () => {
+  withWorkspace('w', 'ws_extra3', (dataDir, entry) => {
+    const db = openDatabase(workspaceDbPath(dataDir, entry));
+    try {
+      assert.throws(
+        () => insertRow(db, 'items', { code: 'E-4', name: '坏的', extra_json: '{"a":{"b":1}}' }),
+        /嵌套/,
+      );
+      assert.throws(
+        () => insertRow(db, 'items', { code: 'E-5', name: '坏的', extra_json: '不是 json' }),
+        /JSON/,
+      );
+      assert.equal(countRows(db, 'items'), 0, '一条都不该写进去');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test('补充信息：mergeExtra 合并 / 空串删除', () => {
+  const base = serializeExtra({ a: '1', b: '2' });
+  assert.equal(mergeExtra(base, { c: '3' }), '{"a":"1","b":"2","c":"3"}');
+  assert.equal(mergeExtra(base, { b: '' }), '{"a":"1"}', '空串 = 删除');
+  assert.equal(mergeExtra(base, { a: '', b: '' }), null, '删空了就是 null');
+  assert.equal(mergeExtra(null, { x: 'y' }), '{"x":"y"}');
+});
+
+test('补充信息：空值存成 NULL 而不是 {}', () => {
+  withWorkspace('w', 'ws_extra4', (dataDir, entry) => {
+    const db = openDatabase(workspaceDbPath(dataDir, entry));
+    try {
+      const it = insertRow(db, 'items', { code: 'E-6', name: '没有补充', extra_json: '{}' });
+      assert.equal(it['extra_json'], null, '空对象应写成 NULL');
+      const raw = db.prepare('SELECT extra_json FROM items WHERE uuid = ?').get(String(it['uuid'])) as { extra_json: unknown };
+      assert.equal(raw.extra_json, null, '库里确实是 NULL，不是 "{}"');
+    } finally {
+      db.close();
+    }
+  });
+});
+
+test('补充信息：进导出包并原样还原', () => {
+  const root = tmpRoot();
+  try {
+    const dataDir = join(root, 'data');
+    const ws = createWorkspace(dataDir, { name: '源', id: 'ws_ex_exp' });
+    const db = openDatabase(workspaceDbPath(dataDir, ws.entry));
+    try {
+      insertRow(db, 'items', { code: 'X-1', name: '空调', extra_json: '{"滤网型号":"M8R-FLP","安装日":"2025-06"}' });
+      insertRow(db, 'items', { code: 'X-2', name: '雨伞', extra_json: null });
+    } finally {
+      db.close();
+    }
+
+    const archive = join(root, 'extra.zip');
+    exportWorkspace(dataDir, ws.entry, { outPath: archive });
+    const result = importArchive(archive, { dataDir, name: '副本', id: 'ws_ex_copy' });
+    assert.equal(result.ok, true, JSON.stringify(result.preview.issues));
+
+    const db2 = openDatabase(workspaceDbPath(dataDir, requireWorkspace(dataDir, 'ws_ex_copy')), { readOnly: true });
+    try {
+      const byName = new Map(selectAll(db2, 'items').map((r) => [String(r['name']), r]));
+      assert.equal(
+        byName.get('空调')!['extra_json'],
+        '{"安装日":"2025-06","滤网型号":"M8R-FLP"}',
+        '补充信息应逐字还原',
+      );
+      assert.equal(byName.get('雨伞')!['extra_json'], null, '原本是空的仍是空');
+    } finally {
+      db2.close();
+    }
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('列配置：位置/规格/备注默认不显示，但可以手动打开', () => {
+  // 默认列里不该有它们 —— 这是"减少默认展示"的落点
+  for (const k of ['location', 'spec', 'notes'] as const) {
+    assert.ok(!DEFAULT_COLUMNS.includes(k), `${k} 不该在默认列里`);
+    assert.ok(COLUMN_KEYS.includes(k), `${k} 仍应可配置`);
+    assert.ok(!columnDef(k).lock, `${k} 不是必显列`);
+  }
+  // 手动打开能生效
+  assert.deepEqual(resolveColumns(['name', 'expiry', 'spec']), ['name', 'expiry', 'spec']);
+});
 
 // ═════════════════════════════════════════════════════════════
 // 列配置
@@ -670,10 +830,10 @@ test('结构：只有 items 与 stock_moves，没有 batches；有 parent_uuid',
   assert.ok(!ddl.includes('CREATE TABLE IF NOT EXISTS batches'), '不应再创建 batches 表');
   assert.match(ddl, /REFERENCES items\(uuid\) ON DELETE CASCADE/);
   assert.match(ddl, /trg_items_updated_at/);
-  for (const col of ['quantity', 'remaining', 'purchased_on', 'expires_on', 'unit_price_cents', 'store', 'status', 'is_bulk', 'parent_uuid', 'sort_order', 'brand', 'model', 'spec']) {
+  for (const col of ['quantity', 'remaining', 'purchased_on', 'expires_on', 'unit_price_cents', 'store', 'status', 'is_bulk', 'parent_uuid', 'sort_order', 'brand', 'model', 'spec', 'extra_json']) {
     assert.ok(new RegExp(`\\b${col}\\b`).test(ddl), `items 应包含 ${col}`);
   }
-  assert.equal(SCHEMA_VERSION, 7);
+  assert.equal(SCHEMA_VERSION, 8);
 });
 
 test('品牌与型号是两个独立字段，都可选填', () => {

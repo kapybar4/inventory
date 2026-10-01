@@ -72,7 +72,7 @@ import { importArchive, previewArchive } from '../core/import';
 import { seedWorkspace } from '../core/seed';
 import { buildManifest } from '../core/manifest';
 import { formatDaysLeft, daysUntil, today } from '../core/dates';
-import { centsToYuan, yuanToCents } from '../core/values';
+import { centsToYuan, yuanToCents, parseExtra, serializeExtra } from '../core/values';
 import { formatBytes } from '../core/util';
 
 /** 数据根目录：测试可用 DSH_INVENTORY_HOME 覆盖 */
@@ -237,6 +237,45 @@ function withDb<T>(wsId: string | null, readOnly: boolean, fn: (db: ReturnType<t
   } finally {
     db.close();
   }
+}
+
+/**
+ * 展开区的数据：把「真实字段」与「自定义字段」合成一个扁平对象。
+ *
+ * 界面拿到的是 `{ fields: [{key,label,value,real}], custom: {...} }`：
+ *   - `fields` 是固定展示的三个真实字段（位置/规格/备注），带中文标签
+ *   - `custom` 是这件东西自己加的字段，界面照原样列出来
+ *
+ * 合并放在这里而不是界面，是为了让"位置到底存在哪"这个实现细节不外泄 ——
+ * 界面只管画，不管某个键是在列里还是在 JSON 里。
+ */
+function buildExtraPayload(row: Row): {
+  uuid: string;
+  name: string;
+  fields: { key: string; label: string; value: string }[];
+  custom: Record<string, string>;
+  count: number;
+} {
+  const s = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
+
+  // 位置是 room + container 两列拼出来的，展开区里当一栏用
+  const location = [s(row['room']), s(row['container'])].filter(Boolean).join(' / ');
+
+  const fields = [
+    { key: 'location', label: '位置', value: location },
+    { key: 'spec', label: '规格', value: s(row['spec']) },
+    { key: 'notes', label: '备注', value: s(row['notes']) },
+  ];
+
+  const custom = parseExtra(s(row['extra_json']));
+
+  return {
+    uuid: s(row['uuid']),
+    name: s(row['name']),
+    fields,
+    custom,
+    count: fields.filter((f) => f.value !== '').length + Object.keys(custom).length,
+  };
 }
 
 function registerHandlers(): void {
@@ -769,6 +808,69 @@ function registerHandlers(): void {
       visible: resolveColumns(saved.columns),
       minimal: isMinimal(saved.columns),
     };
+  });
+
+  /**
+   * 展开区：一次性取某件物品的全部补充信息。
+   *
+   * 位置 / 规格 / 备注来自**真实字段**，自定义字段来自 `extra_json`。
+   * 合成一个扁平对象返回，界面不用关心某个键到底存在哪 ——
+   * 这个划分是存储的实现细节，不该漏到界面上。
+   */
+  handle('item:extra', (wsId, uuid) => {
+    const u = asString(uuid, 'uuid');
+    return withDb(wsId ? asString(wsId, 'wsId') : null, true, (db) => {
+      const row = selectOne(db, 'items', 'uuid = ?', [u], { includeInternal: true });
+      if (!row) throw new WorkspaceNotFoundError(`物品 ${u}`);
+      return buildExtraPayload(row);
+    });
+  });
+
+  /**
+   * 展开区：保存。
+   *
+   * 传进来的 patch 里：
+   *   - 属于真实字段的键（room/container/spec/notes）写回各自的列
+   *   - 其余键进 `extra_json`，**值为空串表示删除该字段**
+   *
+   * 分成两拨写是刻意的：位置要参与分组、规格要参与搜索、备注要参与导出，
+   * 全都塞进 JSON 会让这些功能全部失效。
+   */
+  handle('item:extraSave', (wsId, uuid, patch) => {
+    const u = asString(uuid, 'uuid');
+    if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+      throw new Error('item:extraSave 需要一个对象');
+    }
+    return withDb(wsId ? asString(wsId, 'wsId') : null, false, (db) => {
+      const row = selectOne(db, 'items', 'uuid = ?', [u], { includeInternal: true });
+      if (!row) throw new WorkspaceNotFoundError(`物品 ${u}`);
+
+      const incoming = patch as Record<string, unknown>;
+      const values: Record<string, string | null> = {};
+      const custom: Record<string, string> = {};
+
+      for (const [k, raw] of Object.entries(incoming)) {
+        const text = raw === null || raw === undefined ? '' : String(raw);
+        if (k === 'room' || k === 'container' || k === 'spec' || k === 'notes') {
+          values[k] = text;
+        } else if (k === 'name' || k === 'category' || k === 'extra_json') {
+          // 这几个不接受从这个入口改：名称/分类有自己的表单，
+          // extra_json 由下面的 custom 计算，直接放行会绕过校验
+          continue;
+        } else {
+          custom[k] = text;
+        }
+      }
+
+      // 自定义字段：空值 = 删除。整份覆盖而不是逐个合并，
+      // 因为界面每次传的是"这一行现在全部的自定义字段"。
+      values['extra_json'] = serializeExtra(
+        Object.fromEntries(Object.entries(custom).filter(([, v]) => v !== '')),
+      );
+
+      const updated = updateRow(db, 'items', u, values);
+      return buildExtraPayload(updated ?? row);
+    });
   });
 
   /**

@@ -927,7 +927,7 @@ check('info 报出数据目录与工作区数', () => {
   const d = json(['info']).data.data;
   eq(d.dataDir, HOME, '数据目录');
   ok(d.workspaceCount > 0, '工作区数');
-  eq(d.schemaVersion, 7, '结构版本');
+  eq(d.schemaVersion, 8, '结构版本');
   return `${d.workspaceCount} 个工作区，schema v${d.schemaVersion}`;
 });
 
@@ -1046,9 +1046,12 @@ section('11. 列配置');
 
 check('column list 列出全部列，并标出必显的两列', () => {
   const d = json(['column', 'list']).data.data;
-  eq(d.available.length, 8, '可配置列数');
+  eq(d.available.length, 10, '可配置列数（含默认关掉的 位置/规格/备注）');
   eq(d.locked.join(','), 'name,expiry', '必显列');
-  eq(d.visible.length, 8, '默认全开');
+  eq(d.visible.length, 7, '默认显示的列数');
+  ok(!d.visible.includes('notes'), '备注默认不显示');
+  ok(!d.visible.includes('spec'), '规格默认不显示');
+  ok(!d.visible.includes('location'), '位置默认不显示');
   const name = d.columns.find((c) => c.key === 'name');
   eq(name.lock, true, '物品列必显');
   eq(name.label, '物品', '物品列的中文名');
@@ -1101,11 +1104,11 @@ check('column set --default / --show-all', () => {
   eq(json(['column', 'list']).data.data.visible.length, 2, '先缩到 2 列');
 
   const def = json(['column', 'set', '--default']).data.data;
-  eq(def.visible.length, 8, '--default 回到 8 列');
+  eq(def.visible.length, 7, '--default 回到默认的 7 列');
 
   json(['column', 'set', 'name', 'expiry']);
   const all = json(['column', 'set', '--show-all']).data.data;
-  eq(all.visible.length, 8, '--show-all');
+  eq(all.visible.length, 10, '--show-all 打开全部 10 列');
   return '两个开关都对';
 });
 
@@ -1125,7 +1128,7 @@ check('列配置按工作区隔离', () => {
   const mine = json(['column', 'list', '--ws', '我的家']).data.data.visible.length;
   const parents = json(['column', 'list', '--ws', '父母家']).data.data.visible.length;
   eq(mine, 2, '我的家：2 列');
-  eq(parents, 8, '父母家：不受影响，仍是默认 8 列');
+  eq(parents, 7, '父母家：不受影响，仍是默认 7 列');
   return `${mine} vs ${parents}`;
 });
 
@@ -1135,7 +1138,7 @@ check('列配置不进导出包，副本拿默认值', () => {
   json(['export', '--ws', '我的家', '-o', archive]);
   json(['import', archive, '--name', '列测试副本']);
   const copy = json(['column', 'list', '--ws', '列测试副本']).data.data;
-  eq(copy.visible.length, 8, '副本应是默认 8 列，不继承源的界面偏好');
+  eq(copy.visible.length, 7, '副本应是默认 7 列，不继承源的界面偏好');
   return '副本 = 默认';
 });
 
@@ -1147,6 +1150,128 @@ check('必显列不能被「全部关掉」绕过', () => {
   ok(list.locked.length === 2, '锁定清单固定两项');
   for (const k of list.locked) ok(list.visible.includes(k), `${k} 在可见列里`);
   return '锁定生效';
+});
+
+// ═════════════════════════════════════════════════════════════
+// 12. 补充信息（展开列）
+// ═════════════════════════════════════════════════════════════
+
+section('12. 补充信息');
+
+check('item extra：列出固定三项 + 自定义字段', () => {
+  json(['item', 'add', '--name', '空调', '-c', 'digital', '--extra', '{"滤网型号":"M8R-FLP"}']);
+  const d = json(['item', 'extra', '空调']).data.data;
+  eq(d.fields.length, 3, '固定三项');
+  eq(d.fields.map((f) => f[0]).join(','), '位置,规格,备注', '顺序与名称');
+  eq(d.custom['滤网型号'], 'M8R-FLP', '自定义字段');
+  return JSON.stringify(d.custom);
+});
+
+check('item extra：逐字段设置，自定义字段进 JSON', () => {
+  cli(['item', 'extra', '空调', '报修电话', '400-100-5678']);
+  const d = json(['item', 'extra', '空调']).data.data;
+  eq(d.custom['报修电话'], '400-100-5678', '写进去了');
+  eq(d.custom['滤网型号'], 'M8R-FLP', '原来那个还在（不是整份覆盖）');
+  return Object.keys(d.custom).join(',');
+});
+
+check('item extra：位置拆成 room / container 两列，不是塞进 JSON', () => {
+  cli(['item', 'extra', '空调', 'room', '客厅']);
+  cli(['item', 'extra', '空调', 'container', '净化器旁']);
+  const d = json(['item', 'extra', '空调']).data.data;
+  const loc = d.fields.find((f) => f[0] === '位置');
+  eq(loc[1], '客厅 / 净化器旁', '位置拼出来了');
+  // 关键：它必须是真实列，否则分组、搜索、导出都会失效
+  const it = json(['item', 'list', '--search', '空调']).data.data.items[0];
+  eq(it.room, '客厅', 'room 是真列');
+  eq(it.container, '净化器旁', 'container 是真列');
+  ok(!Object.keys(d.custom).includes('room'), '不该混进自定义字段里');
+  return '真实列';
+});
+
+check('item extra：规格与备注也是真实列', () => {
+  cli(['item', 'extra', '空调', 'spec', '适配 Pro H']);
+  cli(['item', 'extra', '空调', 'notes', '每 6-12 个月换一次']);
+  const it = json(['item', 'list', '--search', '空调']).data.data.items[0];
+  eq(it.spec, '适配 Pro H', 'spec');
+  eq(it.notes, '每 6-12 个月换一次', 'notes');
+  return 'real columns';
+});
+
+check('值传空串 = 删除该字段', () => {
+  cli(['item', 'extra', '空调', '报修电话', '']);
+  const d = json(['item', 'extra', '空调']).data.data;
+  ok(!('报修电话' in d.custom), '字段被删掉了');
+  eq(d.custom['滤网型号'], 'M8R-FLP', '别的没受影响');
+  return 'deleted';
+});
+
+check('--set 整份替换', () => {
+  cli(['item', 'extra', '空调', '--set', '{"a":"1","b":"2"}']);
+  const d = json(['item', 'extra', '空调']).data.data;
+  eq(Object.keys(d.custom).sort().join(','), 'a,b', '整份替换');
+  return '2 个字段';
+});
+
+check('键序不同的同一份内容归一成同一个字符串', () => {
+  cli(['item', 'add', '--name', '甲归一', '-c', 'daily', '--extra', '{"z":"1","a":"2"}']);
+  cli(['item', 'add', '--name', '乙归一', '-c', 'daily', '--extra', '{"a":"2","z":"1"}']);
+  const a = json(['ws', 'stats']).code;
+  void a;
+  const x = json(['item', 'extra', '甲归一']).data.data.custom;
+  const y = json(['item', 'extra', '乙归一']).data.data.custom;
+  eq(JSON.stringify(x), JSON.stringify(y), '两份内容应一致');
+  return JSON.stringify(x);
+});
+
+check('不允许嵌套结构', () => {
+  const r = cli(['item', 'extra', '空调', '--set', '{"地址":{"市":"北京"}}']);
+  eq(r.code, 3, '退出码（数据校验失败）');
+  ok(/嵌套/.test(r.err), '应说明是嵌套的问题');
+  // 数据没被改坏
+  eq(Object.keys(json(['item', 'extra', '空调']).data.data.custom).sort().join(','), 'a,b', '原值不变');
+  return 'exit 3';
+});
+
+check('不是 JSON 对象也拒绝', () => {
+  eq(cli(['item', 'extra', '空调', '--set', '[1,2]']).code, 3, '数组');
+  eq(cli(['item', 'extra', '空调', '--set', '不是json']).code, 3, '文本');
+  eq(cli(['item', 'extra', '空调', '--set', '123']).code, 3, '数字');
+  return 'exit 3 ×3';
+});
+
+check('location 有专门提示（别让人以为它进了 JSON）', () => {
+  const r = cli(['item', 'extra', '空调', 'location', '客厅']);
+  eq(r.code, 2, '退出码');
+  ok(/room/.test(r.err) && /container/.test(r.err), '应引导到 room / container');
+  return 'exit 2';
+});
+
+check('item extra --dry-run 不落库', () => {
+  const before = JSON.stringify(json(['item', 'extra', '空调']).data.data.custom);
+  const r = json(['item', 'extra', '空调', '--set', '{"试":"试"}', '--dry-run']);
+  eq(r.code, 0, '退出码');
+  eq(r.data.data.dryRun, true, 'dryRun 标志');
+  eq(JSON.stringify(json(['item', 'extra', '空调']).data.data.custom), before, '实际没变');
+  return '未写入';
+});
+
+check('补充信息进导出包并原样还原', () => {
+  const archive = join(ROOT, 'extra.zip');
+  json(['export', '--ws', '我的家', '-o', archive]);
+  json(['import', archive, '--name', '补充副本']);
+  const src = json(['item', 'extra', '空调', '--ws', '我的家']).data.data;
+  const dst = json(['item', 'extra', '空调', '--ws', '补充副本']).data.data;
+  eq(JSON.stringify(dst.custom), JSON.stringify(src.custom), '自定义字段逐字一致');
+  eq(dst.fields.find((f) => f[0] === '位置')[1], src.fields.find((f) => f[0] === '位置')[1], '位置一致');
+  return JSON.stringify(dst.custom);
+});
+
+check('列表接口不返回 extra_json（按需拉取）', () => {
+  const it = json(['item', 'list', '--search', '空调']).data.data.items[0];
+  ok(!('extra_json' in it), '列表里不该带上它 —— 绝大多数行不会被展开');
+  ok('spec' in it && 'notes' in it && 'room' in it, '真实字段仍在列表里');
+  return '按需加载';
 });
 
 // ═════════════════════════════════════════════════════════════

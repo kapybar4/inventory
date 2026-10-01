@@ -33,7 +33,15 @@ export type FieldKind =
   | 'datetime'
   | 'year_month'
   | 'uuid'
-  | 'path';
+  | 'path'
+  /**
+   * 扁平 JSON 对象（键值都是字符串，不嵌套），在库里存成 TEXT。
+   *
+   * 用它而不是真开一批列：每件东西要记的附加信息各不相同
+   * （空调记滤网型号、保单记保单号），为这个去 ALTER TABLE 不划算。
+   * 代价是不能用它排序或建索引 —— 所以它只用来"看"，不用来"筛"。
+   */
+  | 'json';
 
 export interface EnumDef {
   key: string;
@@ -341,6 +349,15 @@ export const TABLES: TableDef[] = [
       { name: 'serial_no', kind: 'string', label: '序列号', validation: { maxLength: 120 } },
       { name: 'photo_path', kind: 'path', label: '照片', description: '相对工作区根的 attachments/ 路径' },
       { name: 'notes', kind: 'text', label: '备注' },
+      {
+        name: 'extra_json',
+        kind: 'json',
+        label: '补充信息',
+        description:
+          '一个**扁平**的 JSON 对象，键值都是字符串，**不允许嵌套**。' +
+          '存每件东西额外想记的东西（滤网型号、保单号、报修电话…）。' +
+          '界面上不占列，点行首的展开箭头才显示。默认列为空时写 NULL 而不是 {}。',
+      },
       { name: 'tags', kind: 'string', label: '标签', description: '逗号分隔' },
       COL_CREATED_AT,
       COL_UPDATED_AT,

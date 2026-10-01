@@ -42,7 +42,9 @@ export type ColumnKey =
   | 'location'
   | 'quantity'
   | 'purchased'
-  | 'expiry';
+  | 'expiry'
+  | 'spec'
+  | 'notes';
 
 export interface ColumnDef {
   key: ColumnKey;
@@ -63,8 +65,15 @@ export interface ColumnDef {
 /**
  * 物品表的列，顺序就是显示顺序。
  *
- * 刻意不包含：拖动时的序号、行首手柄、行尾的操作按钮 ——
- * 那些是**表格的机能**，不是"字段"，关掉表格就没法用了。
+ * ── 哪些列「默认关」 ──
+ *
+ * `room` / `container` / `spec` / `notes` 默认关着，但**仍然可以手动打开**。
+ * 它们的信息量不小（位置一列能占掉 20 个字宽），可大多数时候你只想扫一眼
+ * "什么东西、什么时候过期"。所以默认收进展开区（见 `extra` 列），
+ * 真想拿它们当列用的人可以在列设置里打开 —— 只是不再默认占位。
+ *
+ * 刻意不包含：行首的展开箭头、拖动时的序号手柄、行尾的操作按钮。
+ * 那些是**表格的机能**而不是"字段"，关掉表格就没法用了，所以不能配。
  */
 export const ITEM_COLUMNS: ColumnDef[] = [
   {
@@ -84,9 +93,53 @@ export const ITEM_COLUMNS: ColumnDef[] = [
   { key: 'category', label: '分类', hint: '所属分类，未分类显示为「未分类」', defaultOn: true },
   { key: 'brand', label: '品牌', hint: '选填字段', defaultOn: true },
   { key: 'model', label: '型号', hint: '选填字段，与规格不同', defaultOn: true },
-  { key: 'location', label: '位置', hint: '房间 / 容器', defaultOn: true },
   { key: 'quantity', label: '数量', hint: '批量物品显示「剩余/总数」', defaultOn: true, align: 'right' },
   { key: 'purchased', label: '购买日期', hint: '选填字段', defaultOn: true },
+  {
+    key: 'location',
+    label: '位置',
+    hint: '房间 / 容器。默认收在展开区里 —— 打开这列会明显占宽度',
+    defaultOn: false,
+  },
+  {
+    key: 'spec',
+    label: '规格',
+    hint: '选填字段。默认收在展开区里',
+    defaultOn: false,
+  },
+  {
+    key: 'notes',
+    label: '备注',
+    hint: '默认收在展开区里。备注通常很长，当列显示会把表撑开',
+    defaultOn: false,
+  },
+];
+
+/**
+ * 不占列、只在行首放一个箭头的控制器。
+ *
+ * 它不是"字段"而是"入口"，所以**不进 `ITEM_COLUMNS`**：
+ * 一旦进去，用户就能把它关掉，然后永远看不到补充信息。
+ */
+export const EXTRA_COLUMN: { key: string; label: string; hint: string } = {
+  key: 'extra',
+  label: '补充信息',
+  hint: '点开查看位置、规格、备注，以及这件东西额外的字段',
+};
+
+/**
+ * 展开区里**固定展示**的字段：真实列名 → 显示名。
+ *
+ * 它们仍然是 items 里的真实字段（不是塞进 JSON 的），原因：
+ *   - 位置要参与分组、规格要参与搜索、备注要参与导出
+ *   - 变成 JSON 之后这些都要重写，而收益只有"少三列"
+ *
+ * 展开区只是它们统一的使用入口：默认不占列，点开就能看和改。
+ */
+export const EXTRA_REAL_FIELDS: { key: 'location' | 'spec' | 'notes'; label: string }[] = [
+  { key: 'location', label: '位置' },
+  { key: 'spec', label: '规格' },
+  { key: 'notes', label: '备注' },
 ];
 
 export const COLUMN_KEYS: ColumnKey[] = ITEM_COLUMNS.map((c) => c.key);
@@ -170,6 +223,10 @@ export function columnText(key: ColumnKey, row: Row): string {
       return s(row['purchased_on']);
     case 'expiry':
       return s(row['expires_on']);
+    case 'spec':
+      return s(row['spec']);
+    case 'notes':
+      return s(row['notes']);
     default:
       return '';
   }
@@ -187,6 +244,7 @@ export function columnWidthHint(key: ColumnKey): 'narrow' | 'normal' | 'wide' {
     case 'purchased':
       return 'narrow';
     case 'location':
+    case 'notes':
       return 'wide';
     default:
       return 'normal';

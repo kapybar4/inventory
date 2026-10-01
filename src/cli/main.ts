@@ -87,7 +87,7 @@ import { applyItemOrder, nextItemCode } from '../core/db';
 import { formatDaysLeft, daysUntil, today, monthEnd } from '../core/dates';
 import { seedWorkspace } from '../core/seed';
 import { buildManifest } from '../core/manifest';
-import { centsToYuan, yuanToCents, FieldError } from '../core/values';
+import { centsToYuan, yuanToCents, FieldError, mergeExtra, parseExtra, serializeExtra } from '../core/values';
 import { formatBytes } from '../core/util';
 import { ArgError, arr, bool, num, parseArgv, requireStr, str, type OptionSpec, type ParsedArgs } from './args';
 
@@ -454,6 +454,12 @@ function itemOptionSpecs(): OptionSpec[] {
     { name: 'noBulk', type: 'boolean', desc: '关闭「批量」（默认）：数量恒为 1' },
     { name: 'prescription', type: 'boolean', desc: '标记为处方药' },
     { name: 'notes', type: 'string', desc: '备注', valueName: '文本' },
+    {
+      name: 'extra',
+      type: 'string',
+      desc: '补充信息：扁平 JSON 对象，如 \'{"滤网型号":"M8R-FLP"}\'。整份覆盖',
+      valueName: 'JSON',
+    },
     ...JSON_INPUT_OPTS,
   ];
 }
@@ -471,6 +477,9 @@ function itemValuesFromArgs(args: ParsedArgs, partial: boolean): Record<string, 
   Object.assign(v, itemMoneyValues(args));
 
   if (bool(args, 'prescription')) v['is_prescription'] = 'true';
+  // 补充信息：值在写入层会被解析与归一，这里原样传下去
+  const extra = str(args, 'extra');
+  if (extra !== undefined) v['extra_json'] = extra;
   if (bool(args, 'bulk')) v['is_bulk'] = 'true';
   if (bool(args, 'noBulk')) v['is_bulk'] = 'false';
   if (bool(args, 'unclassified')) v['category'] = null;
@@ -1444,6 +1453,131 @@ function cmdItemList(args: ParsedArgs, dataDir: string): number {
  *
  * 这就是界面上「拖动」落库的那一步。顺序只在**默认状态**（未开启排序）下生效。
  */
+/**
+ * `item extra` —— 补充信息的读写。
+ *
+ * 位置 / 规格 / 备注来自真实列，自定义字段来自 `extra_json`；
+ * 这里合成一个扁平对象呈现，让用命令行的人不必关心某个键存在哪。
+ * 写的时候按同一张映射表分流：属于真实列的回真实列，
+ * 否则进 JSON —— 位置要参与分组、规格要参与搜索，塞进 JSON 就全废了。
+ */
+const EXTRA_REAL: Record<string, string> = {
+  location: 'location',
+  // 「位置」在库里是 room + container 两列，命令行里拆开更明确
+  room: 'room',
+  container: 'container',
+  spec: 'spec',
+  notes: 'notes',
+};
+
+function cmdItemExtra(args: ParsedArgs, dataDir: string): number {
+  const entry = resolveWorkspace(dataDir, str(args, 'ws'));
+  const key = args._[0];
+  if (!key) {
+    throw new ArgError(
+      '用法: item extra <物品> [<字段> <值>]\n' + '  item extra 空调\n  item extra 空调 滤网型号 M8R-FLP',
+    );
+  }
+
+  const db = openDatabase(workspaceDbPath(dataDir, entry));
+  try {
+    const item = findItem(db, key);
+    const uuid = String(item['uuid']);
+
+    // ── 读 ──
+    const readAll = (): { fields: [string, string][]; custom: Record<string, string> } => {
+      const row = selectOne(db, 'items', 'uuid = ?', [uuid], { includeInternal: true }) ?? item;
+      const s = (v: unknown): string => (v === null || v === undefined ? '' : String(v));
+      return {
+        fields: [
+          ['位置', [s(row['room']), s(row['container'])].filter(Boolean).join(' / ')],
+          ['规格', s(row['spec'])],
+          ['备注', s(row['notes'])],
+        ],
+        custom: parseExtra(s(row['extra_json'])),
+      };
+    };
+
+    const setArg = str(args, 'set');
+    const fieldName = args._[1];
+    const fieldValue = args._[2];
+
+    if (bool(args, 'dryRun') && (setArg !== undefined || fieldName !== undefined)) {
+      const preview = setArg !== undefined ? parseExtra(setArg) : { [String(fieldName)]: String(fieldValue ?? '') };
+      if (out.json) emitJson({ dryRun: true, workspaceId: entry.id, wouldSet: preview });
+      else {
+        write(`将把「${String(item['name'])}」的补充信息改为：`);
+        for (const [k, v] of Object.entries(preview)) write(`  ${k} = ${v === '' ? '(删除)' : v}`);
+      }
+      return EXIT.OK;
+    }
+
+    // ── 整份替换 ──
+    if (setArg !== undefined) {
+      const patch = parseExtra(setArg);
+      updateRow(db, 'items', uuid, { extra_json: serializeExtra(patch) });
+      const after = readAll();
+      if (out.json) emitJson({ workspaceId: entry.id, uuid, ...after });
+      else writeExtra(after, String(item['name']));
+      return EXIT.OK;
+    }
+
+    // ── 设一个字段 ──
+    if (fieldName !== undefined) {
+      const value = fieldValue ?? '';
+      const real = EXTRA_REAL[fieldName];
+
+      if (fieldName === 'location') {
+        throw new ArgError('「位置」在库里分两列，请用 `item extra <物品> room <房间>` 与 `... container <柜格>`');
+      }
+
+      if (real) {
+        updateRow(db, 'items', uuid, { [real]: value });
+      } else {
+        // 自定义字段：空值 = 删掉这个键
+        const merged = mergeExtra(String(item['extra_json'] ?? ''), { [fieldName]: value });
+        updateRow(db, 'items', uuid, { extra_json: merged });
+      }
+
+      const after = readAll();
+      if (out.json) emitJson({ workspaceId: entry.id, uuid, ...after });
+      else {
+        write(value === '' ? `已删除字段「${fieldName}」` : `已设置「${fieldName}」= ${value}`);
+      }
+      return EXIT.OK;
+    }
+
+    // ── 查看 ──
+    const data = readAll();
+    if (out.json) emitJson({ workspaceId: entry.id, uuid, name: String(item['name']), ...data });
+    else writeExtra(data, String(item['name']));
+    return EXIT.OK;
+  } finally {
+    db.close();
+  }
+}
+
+function writeExtra(
+  data: { fields: [string, string][]; custom: Record<string, string> },
+  name: string,
+): void {
+  write(`${name} —— 补充信息`);
+  printTable(data.fields, [
+    { title: '字段', get: (r) => r[0], max: 8 },
+    { title: '值', get: (r) => r[1] || '—', max: 60 },
+  ]);
+  const keys = Object.keys(data.custom).sort((a, b) => a.localeCompare(b, 'zh'));
+  if (keys.length > 0) {
+    write('\n这件东西自己的字段：');
+    printTable(keys, [
+      { title: '字段', get: (k) => k, max: 24 },
+      { title: '值', get: (k) => data.custom[k] ?? '', max: 60 },
+    ]);
+  } else {
+    write('\n（没有自定义字段。用 `item extra <物品> <字段> <值>` 添加）');
+  }
+}
+
 function cmdItemReorder(args: ParsedArgs, dataDir: string): number {
   const entry = resolveWorkspace(dataDir, str(args, 'ws'));
   const keys = args._;
@@ -2974,6 +3108,21 @@ const COMMANDS: Command[] = [
       DRY_RUN,
     ],
     run: cmdItemStock,
+  },
+  {
+    path: ['item', 'extra'],
+    summary: '查看或修改补充信息（位置 / 规格 / 备注 + 这件东西自己的字段）',
+    usage:
+      'item extra <物品>                       查看\n' +
+      '       item extra <物品> <字段> <值>          设置一个字段（空值 = 删除）\n' +
+      '       item extra <物品> --set \'{"滤网型号":"M8R-FLP"}\'  整份替换\n' +
+      '       item extra <物品> --json             以 JSON 输出',
+    options: [
+      { name: 'set', type: 'string', desc: '整份替换为这个扁平 JSON 对象', valueName: 'JSON' },
+      { name: 'ws', type: 'string', desc: '工作区（默认当前）', valueName: '工作区' },
+      DRY_RUN,
+    ],
+    run: cmdItemExtra,
   },
   {
     path: ['item', 'reorder'],

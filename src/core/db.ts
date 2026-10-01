@@ -16,6 +16,7 @@ import {
   toSqlValue,
   deriveExpiryColumns,
   normalizeBulkItem,
+  normalizeExtra,
   validateFieldValue,
   type CellValue,
 } from './values';
@@ -528,6 +529,9 @@ function validateRow(table: string, values: Record<string, string | null>): void
     const v = values[f.name];
     if (v === undefined) continue;
     validateFieldValue(v, f.kind, f.label || f.name, f.enumName, ENUMS);
+    // 有些类型除了校验还要**归一**：JSON 要排好键序再存，
+    // 否则同一份内容会因为键顺序不同而在往返比较里"看起来变了"
+    if (f.kind === 'json') values[f.name] = normalizeExtra(v);
   }
 }
 

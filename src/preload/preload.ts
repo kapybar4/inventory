@@ -49,6 +49,15 @@ const api = {
     /** 一键清理「非批量且剩余为 0」的记录；dryRun 只取清单 */
     purgeSpent: (wsId: string | null, dryRun?: boolean) => call('item:purgeSpent', wsId, dryRun === true),
     delete: (wsId: string | null, uuid: string) => call('item:delete', wsId, uuid),
+    /**
+     * 展开区：位置 / 规格 / 备注 + 这件东西自己的补充字段。
+     *
+     * 保存时值为空串表示删除该字段；位置/规格/备注会写回各自的真实列，
+     * 其余进 extra_json —— 这个划分由主进程处理，界面不用关心。
+     */
+    extra: (wsId: string | null, uuid: string) => call('item:extra', wsId, uuid),
+    extraSave: (wsId: string | null, uuid: string, patch: Record<string, string>) =>
+      call('item:extraSave', wsId, uuid, patch),
   },
   /** 批量物品的「一组库存」 */
   stock: {

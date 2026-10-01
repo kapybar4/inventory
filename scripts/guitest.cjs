@@ -186,6 +186,90 @@ app.whenReady().then(() => {
       return { restored };
     `);
 
+    // ── 3f. 展开列（补充信息）──
+    await ev('03f_默认收起', `${PRELUDE}
+      need(tab('物品'), '物品页签').click();
+      await wait(1000);
+      return {
+        toggles: $$('#view .extra-toggle').length,
+        expandedRows: $$('#view tr.extra-row').length,
+        hasLocationColumn: $$('#view thead th').some(th => th.textContent.trim() === '位置'),
+        hasSpecColumn: $$('#view thead th').some(th => th.textContent.trim() === '规格'),
+        hasNotesColumn: $$('#view thead th').some(th => th.textContent.trim() === '备注'),
+      };
+    `);
+
+    await ev('03g_点开展开区', `${PRELUDE}
+      const btn = need($('#view .extra-toggle'), '展开按钮');
+      btn.click();
+      await wait(1200);
+      const box = $('#view .extra-box');
+      const names = box ? Array.from(box.querySelectorAll('[name]')).map(x => x.getAttribute('name')) : [];
+      return {
+        expandedRows: $$('#view tr.extra-row').length,
+        labels: box ? Array.from(box.querySelectorAll('.extra-label')).map(x => x.textContent.trim()) : [],
+        inputs: names,
+        hasAdder: !!$('#view .extra-add'),
+        openClass: !!$('#view .extra-toggle.open'),
+        colspan: $('#view tr.extra-row td') ? $('#view tr.extra-row td').colSpan : null,
+      };
+    `);
+
+    await ev('03h_加一个自定义字段', `${PRELUDE}
+      const keyIn = need($('#view [name=newFieldKey]'), '字段名输入框');
+      const valIn = need($('#view [name=newFieldValue]'), '值输入框');
+      keyIn.value = '走查字段';
+      valIn.value = '走查值';
+      clickButton($('#view .extra-add'), /加一个字段/);
+      await wait(1500);
+      const box = $('#view .extra-box');
+      return {
+        customLabels: box ? Array.from(box.querySelectorAll('.extra-field.custom .extra-label')).map(x => x.textContent.trim()) : [],
+        customInput: box && box.querySelector('[name="ex_走查字段"]') ? box.querySelector('[name="ex_走查字段"]').value : null,
+        // 加了字段后列表会重拉，展开状态要保持住
+        stillExpanded: $$('#view tr.extra-row').length,
+      };
+    `);
+
+    await ev('03i_改真实字段会落到库里', `${PRELUDE}
+      // 物品页的行没有 .item-row 类（那是分组页的），从展开行反查它前面那一行
+      const extraRow = need($('#view tr.extra-row'), '已展开的行');
+      const row = need(extraRow.previousElementSibling, '展开行前面的数据行');
+      const name = need(row.querySelector('a.link'), '该行的物品名').textContent.trim();
+      const item = (await window.api.item.list(null, { search: name }))[0];
+      if (!item) throw new Error('列表里找不到 ' + name);
+
+      const spec = need($('#view [name=ex_spec]'), '规格输入框');
+      spec.value = '走查规格';
+      spec.dispatchEvent(new Event('blur'));
+      await wait(1600);
+
+      const saved = await window.api.item.extra(null, item.uuid);
+      const after = (await window.api.item.list(null, { search: name }))[0];
+      return {
+        name,
+        savedSpec: saved.fields.find(f => f.label === '规格').value,
+        savedCustom: saved.custom,
+        // 列表接口里的 spec 也变了 —— 说明真的写进了真实列而不是 JSON
+        listSpec: after.spec,
+        specNotInCustom: !('spec' in saved.custom),
+      };
+    `);
+
+    await ev('03j_收起并持久化检查', `${PRELUDE}
+      const btn = $('#view .extra-toggle.open');
+      if (btn) { btn.click(); await wait(900); }
+      // 换个页签再回来，展开状态应当被重置（只存在内存里）
+      need(tab('概览'), '概览页签').click();
+      await wait(900);
+      need(tab('物品'), '物品页签').click();
+      await wait(1000);
+      return {
+        expandedAfterTabSwitch: $$('#view tr.extra-row').length,
+        toggles: $$('#view .extra-toggle').length,
+      };
+    `);
+
     // ── 4. 新增：打开表单 ──
     await ev('04_打开新增表单', `${PRELUDE}
       clickButton($('#view'), /新增物品/);

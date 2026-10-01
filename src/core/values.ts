@@ -76,6 +76,10 @@ export function normalizeValue(t: string, kind: FieldKind, fieldName: string): s
       if (!isUuid(lower)) throw new FieldError(`${fieldName}: 期望 UUID，实际为 "${t}"`);
       return lower;
     }
+    case 'json': {
+      // 规范化成「键有序、无空值」的紧凑形式；空对象 → ''（写入层会翻成 NULL）
+      return normalizeExtra(t) ?? '';
+    }
     default:
       return t;
   }
@@ -126,6 +130,119 @@ export function validateFieldValue(
 
   // 其余按 kind 的类型规则走，复用同一份规范化逻辑
   normalizeValue(value, kind, fieldName);
+}
+
+// ─────────────────────────────────────────────────────────────
+// 补充信息（extra_json）
+//
+// 一个**扁平**的 JSON 对象：键是字段名，值是字符串。不允许嵌套。
+//
+// 为什么不做嵌套：这东西是给人看和随手加的，嵌套之后界面上就得做
+// 递归编辑器，而实际要记的东西就是"滤网型号 = M8R-FLP"这种一行一条。
+// 限制住形状，校验简单、界面简单、导出还是一格 CSV。
+// ─────────────────────────────────────────────────────────────
+
+/** 补白键名，避免出现 "" 这种没法点、没法删的字段 */
+const EXTRA_KEY_MAX = 60;
+const EXTRA_VALUE_MAX = 2000;
+const EXTRA_FIELDS_MAX = 50;
+
+/** 解析成扁平对象。不是对象、或是数组，都当空。 */
+export function parseExtra(raw: string | null | undefined): Record<string, string> {
+  if (raw === null || raw === undefined) return {};
+  const text = String(raw).trim();
+  if (text === '' || text === '{}') return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    throw new FieldError(`补充信息: 不是合法的 JSON（${(err as Error).message}）`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new FieldError('补充信息: 期望一个 JSON 对象，例如 {"滤网型号":"M8R-FLP"}');
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    const key = k.trim();
+    if (key === '') continue;
+    // 值一律转成字符串：界面上就是文本框，存数字/布尔只会让导出多一种形状
+    if (v === null || v === undefined) {
+      out[key] = '';
+      continue;
+    }
+    if (typeof v === 'object') {
+      throw new FieldError(`补充信息: 字段「${key}」的值是嵌套结构，不支持 —— 只能是字符串`);
+    }
+    out[key] = String(v);
+  }
+  return out;
+}
+
+/**
+ * 规范化成入库用的一格字符串。
+ *
+ * **键按字典序输出**，这样同一份内容永远得到同一个字符串：
+ * 往返不变式比较的是字符串，顺序不定会让"看起来没变"的东西比较失败。
+ *
+ * 空对象 → `null`（写成 SQL NULL），避免库里同时存在 `NULL` 与 `{}` 两种空。
+ */
+export function serializeExtra(obj: Record<string, string>): string | null {
+  const keys = Object.keys(obj).filter((k) => k !== '');
+  if (keys.length === 0) return null;
+  keys.sort();
+  const ordered: Record<string, string> = {};
+  for (const k of keys) ordered[k] = obj[k] ?? '';
+  return JSON.stringify(ordered);
+}
+
+/**
+ * 写入前的规范化 + 校验：接受字符串或已经是对象的写法。
+ *
+ * 返回入库用的字符串（或 null）。
+ */
+export function normalizeExtra(raw: unknown): string | null {
+  let obj: Record<string, string>;
+
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw === 'string') {
+    if (raw.trim() === '') return null;
+    obj = parseExtra(raw);
+  } else if (typeof raw === 'object' && !Array.isArray(raw)) {
+    // 界面直接传对象（比让人自己拼 JSON 字符串友好）
+    obj = parseExtra(JSON.stringify(raw));
+  } else {
+    throw new FieldError('补充信息: 期望 JSON 字符串或对象');
+  }
+
+  const keys = Object.keys(obj);
+  if (keys.length > EXTRA_FIELDS_MAX) {
+    throw new FieldError(`补充信息: 最多 ${EXTRA_FIELDS_MAX} 个字段，现在有 ${keys.length} 个`);
+  }
+  for (const k of keys) {
+    if (k.length > EXTRA_KEY_MAX) {
+      throw new FieldError(`补充信息: 字段名「${k.slice(0, 12)}…」超过 ${EXTRA_KEY_MAX} 字`);
+    }
+    if ((obj[k] ?? '').length > EXTRA_VALUE_MAX) {
+      throw new FieldError(`补充信息: 字段「${k}」的值超过 ${EXTRA_VALUE_MAX} 字`);
+    }
+  }
+
+  return serializeExtra(obj);
+}
+
+/** 往补充信息里合并若干字段；值为空串表示删除该字段 */
+export function mergeExtra(
+  raw: string | null | undefined,
+  patch: Record<string, string>,
+): string | null {
+  const obj = parseExtra(raw);
+  for (const [k, v] of Object.entries(patch)) {
+    const key = k.trim();
+    if (key === '') continue;
+    if (v === '') delete obj[key];
+    else obj[key] = v;
+  }
+  return serializeExtra(obj);
 }
 
 /** SQLite 值 → 内存字符串表示 */

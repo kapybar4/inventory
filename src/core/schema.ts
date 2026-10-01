@@ -111,5 +111,6 @@ END`,
  *   v3 = 加 parent_uuid（批量物品的「一组库存」子行）、取消编号与到期类型
  *   v4 = 分类可留空（未分类）、加 sort_order（手动顺序）
  *   v5 = 加 model（型号，与 spec 规格分开）
+ *   v6 = 加 extra_json（补充信息，扁平 JSON）
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;

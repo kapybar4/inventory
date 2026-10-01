@@ -342,6 +342,22 @@ interface DshApi {
       dryRun?: boolean,
     ): Promise<{ purged: number; items: { uuid: string; name: string; location: string }[]; dryRun: boolean }>;
     delete(wsId: string | null, uuid: string): Promise<{ deleted: boolean }>;
+    /**
+     * 展开区：位置 / 规格 / 备注 + 这件东西自己的补充字段。
+     *
+     * 保存时值为空串表示删除该字段。
+     */
+    extra(
+      wsId: string | null,
+      uuid: string,
+    ): Promise<{
+      uuid: string;
+      name: string;
+      fields: { key: string; label: string; value: string }[];
+      custom: Record<string, string>;
+      count: number;
+    }>;
+    extraSave(wsId: string | null, uuid: string, patch: Record<string, string>): Promise<unknown>;
   };
   /** 批量物品的「一组库存」 */
   stock: {
@@ -468,6 +484,13 @@ const state: {
   categoryFilter: string;
   /** 物品页里展开了「一组库存」的行 */
   expanded: Set<string>;
+  /**
+   * 展开了「补充信息」的行。
+   *
+   * 与 `expanded`（批量物品的库存明细）分开：两者可以同时展开，
+   * 而且触发的入口不同，混在一个集合里会让"点箭头把库存明细也打开了"。
+   */
+  extraOpen: Set<string>;
   /** 物品表当前显示哪些列。锁定列一定在里面（由 core 保证） */
   columnVisible: string[];
   /** 可配置的列清单，来自 core */
@@ -495,6 +518,7 @@ const state: {
   groupOnlyExpired: false,
   categoryFilter: '',
   expanded: new Set<string>(),
+  extraOpen: new Set<string>(),
   columnVisible: [],
   columnAvailable: [],
   columnLocked: [],
@@ -1555,12 +1579,16 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
   const t = el('table', { class: 'items group-items' });
   const head = el('tr');
   if (draggable) head.append(el('th', { class: 'seq', text: '' }));
+  head.append(el('th', { class: 'col-extra', text: '' }));
   head.append(el('th', { class: 'seq', text: '#' }));
   for (const c of cols) {
     head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
   }
   head.append(el('th', { text: '' }));
   t.append(el('thead', {}, head));
+
+  // colspan：手柄(可选) + 展开箭头 + 位次 + 配置列 + 操作
+  const colSpan = cols.length + 3 + (draggable ? 1 : 0);
 
   const body = el('tbody');
   body.dataset['path'] = pathKey(node.path);
@@ -1576,6 +1604,8 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
       tr.append(grip);
       makeItemDraggable(tr, body);
     }
+
+    tr.append(el('td', { class: 'col-extra' }, extraToggle(it)));
 
     // 位次：排序开着时是排序后的位置，关着时就是手动顺序的位置
     tr.append(td(String(i + 1), 'seq muted'));
@@ -1594,6 +1624,9 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
     tr.append(ops);
 
     body.append(tr);
+
+    // 展开区：与物品页同一份实现
+    if (state.extraOpen.has(it.uuid)) body.append(extraPanel(it, colSpan));
   });
 
   t.append(body);
@@ -2131,6 +2164,13 @@ function itemCols(): ItemCol[] {
       },
     },
     { key: 'purchased', head: '购买', cell: (it) => td(it.purchased_on ?? '', 'muted mono') },
+    {
+      key: 'location',
+      head: '位置',
+      cell: (it) => td([it.room, it.container].filter(Boolean).join(' / '), 'muted'),
+    },
+    { key: 'spec', head: '规格', cell: (it) => td(it.spec ?? '', 'muted') },
+    { key: 'notes', head: '备注', cell: (it) => td(it.notes ?? '', 'muted wrap') },
   ];
 }
 
@@ -2142,6 +2182,237 @@ function visibleItemCols(keys: string[] | undefined): ItemCol[] {
   const picked = all.filter((c) => wanted.has(c.key));
   // 兜底：core 已经保证「物品」「到期时间」在，这里再防一次空表
   return picked.length > 0 ? picked : all;
+}
+
+// ─────────────────────────────────────────────────────────────
+// 展开区（补充信息）
+//
+// 需求：表格里加一个"按键"，用户主动点开才显示位置、规格、备注这些，
+// 默认不占地方。位置/规格/备注仍然是**真实字段**（要参与分组、搜索、导出），
+// 额外每件东西还能自己加字段，那些存在 items.extra_json 里（扁平 JSON）。
+//
+// 就地展开而不是弹窗：能边看列表边看详情，也不用为"看一眼"付一次
+// 弹窗开关的代价。展开状态记在 state 里，页面重画后保持。
+// ─────────────────────────────────────────────────────────────
+
+/** 行首的展开按钮 */
+function extraToggle(it: ItemRow): HTMLElement {
+  const open = state.extraOpen.has(it.uuid);
+  const btn = el('button', {
+    class: `extra-toggle${open ? ' open' : ''}`,
+    type: 'button',
+    text: '▸',
+    title: open ? '收起补充信息' : '展开补充信息（位置、规格、备注、自定义字段）',
+  });
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  btn.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    if (open) state.extraOpen.delete(it.uuid);
+    else state.extraOpen.add(it.uuid);
+    render();
+  });
+  return btn;
+}
+
+/**
+ * 展开后的内容区，占满整行（colspan）。
+ *
+ * 数据是**按需拉取**的：列表接口不返回 extra_json 里的自定义字段，
+ * 因为绝大多数行不会被展开。这样列表查询不用为没人看的数据买单。
+ */
+function extraPanel(it: ItemRow, colSpan: number): HTMLElement {
+  const tr = el('tr', { class: 'extra-row' });
+  const tdEl = el('td');
+  tdEl.colSpan = colSpan;
+
+  const box = el('div', { class: 'extra-box' });
+  box.append(el('div', { class: 'extra-loading muted small', text: '正在读取…' }));
+  tdEl.append(box);
+  tr.append(tdEl);
+
+  void (async () => {
+    try {
+      const data = await window.api.item.extra(state.wsId, it.uuid);
+      box.innerHTML = '';
+      box.append(buildExtraEditor(it, data));
+    } catch (err) {
+      box.innerHTML = '';
+      box.append(el('div', { class: 'muted small', text: `读取失败：${(err as Error).message}` }));
+    }
+  })();
+
+  return tr;
+}
+
+/**
+ * 编辑器：三个真实字段 + 任意条自定义字段。
+ *
+ * 保存策略是**失焦即存**，没有"保存"按钮 ——
+ * 展开区本来就是随手记一笔的地方，多一步确认只会让人不想用。
+ * 每次只提交**改动的那个键**，不是整份覆盖，避免两个字段互相覆盖。
+ */
+function buildExtraEditor(
+  it: ItemRow,
+  data: {
+    fields: { key: string; label: string; value: string }[];
+    custom: Record<string, string>;
+  },
+): HTMLElement {
+  const wrap = el('div', { class: 'extra-grid' });
+
+  /** 提交单个键；值空串 = 清除 */
+  const commit = async (key: string, value: string): Promise<void> => {
+    try {
+      await window.api.item.extraSave(state.wsId, it.uuid, { [key]: value });
+      // 位置/规格/备注改了要反映到列表行的列上，所以重拉列表
+      await refreshItems();
+      render();
+    } catch (err) {
+      fail(err);
+    }
+  };
+
+  const rowFor = (label: string, key: string, value: string, multiline: boolean): HTMLElement => {
+    const row = el('div', { class: 'extra-field' });
+    row.append(el('label', { class: 'extra-label', text: label }));
+
+    const input = (
+      multiline
+        ? el('textarea', { name: `ex_${key}`, rows: '2' })
+        : el('input', { type: 'text', name: `ex_${key}` })
+    ) as HTMLInputElement | HTMLTextAreaElement;
+    input.value = value;
+    input.placeholder = multiline ? '随手记一笔…' : '（空）';
+
+    // 失焦即存，且只在真的变了的时候发请求
+    let last = value;
+    input.addEventListener('blur', () => {
+      if (input.value === last) return;
+      last = input.value;
+      void commit(key, input.value);
+    });
+    // 回车提交（多行框用 Ctrl+Enter）
+    input.addEventListener('keydown', (ev) => {
+      const isEnter = (ev as KeyboardEvent).key === 'Enter';
+      if (!isEnter) return;
+      if (multiline && !(ev as KeyboardEvent).ctrlKey) return;
+      ev.preventDefault();
+      input.blur();
+    });
+
+    row.append(input);
+
+    // 有内容才给"清除"，空的时候放个按钮只是噪音
+    if (value !== '') {
+      const clear = el('button', { class: 'ghost small', type: 'button', text: '清除' });
+      clear.title = '清空这一项';
+      clear.addEventListener('click', () => {
+        input.value = '';
+        last = '';
+        void commit(key, '');
+      });
+      row.append(clear);
+    }
+
+    return row;
+  };
+
+  // ── 固定三项：位置 / 规格 / 备注 ──
+  for (const f of data.fields) {
+    // 位置是 room + container 两列，展开区里当一栏
+    if (f.key === 'location') {
+      const row = el('div', { class: 'extra-field' });
+      row.append(el('label', { class: 'extra-label', text: '位置' }));
+      const pair = el('div', { class: 'extra-pair' });
+
+      const mk = (label: string, key: 'room' | 'container', val: string): HTMLElement => {
+        const box = el('div');
+        box.append(el('span', { class: 'extra-sub', text: label }));
+        const inp = el('input', { type: 'text', name: `ex_${key}` }) as HTMLInputElement;
+        inp.value = val;
+        inp.placeholder = key === 'room' ? '如 客厅' : '如 药箱-上层';
+        let last = val;
+        inp.addEventListener('blur', () => {
+          if (inp.value === last) return;
+          last = inp.value;
+          void commit(key, inp.value);
+        });
+        box.append(inp);
+        return box;
+      };
+
+      // 列表行里已经带了 room / container，这里直接用，省一次请求
+      pair.append(mk('房间', 'room', it.room ?? ''), mk('容器 / 柜格', 'container', it.container ?? ''));
+      row.append(pair);
+      wrap.append(row);
+      continue;
+    }
+    wrap.append(rowFor(f.label, f.key, f.value, f.key === 'notes'));
+  }
+
+  // ── 自定义字段 ──
+  const customKeys = Object.keys(data.custom).sort((a, b) => a.localeCompare(b, 'zh'));
+  if (customKeys.length > 0) {
+    wrap.append(el('div', { class: 'extra-sep', text: '这件东西自己的字段' }));
+    for (const k of customKeys) {
+      const row = rowFor(k, k, data.custom[k] ?? '', (data.custom[k] ?? '').length > 60);
+      row.classList.add('custom');
+      // 自定义字段可以整条删掉（键也一起没）
+      const del = el('button', { class: 'ghost small danger-text', type: 'button', text: '删除' });
+      del.title = `删除字段「${k}」`;
+      del.addEventListener('click', () => void commit(k, ''));
+      row.append(del);
+      wrap.append(row);
+    }
+  }
+
+  // ── 加一个字段 ──
+  const adder = el('div', { class: 'extra-add' });
+  const keyInput = el('input', { type: 'text', name: 'newFieldKey', placeholder: '字段名，如 滤网型号' }) as HTMLInputElement;
+  const valInput = el('input', { type: 'text', name: 'newFieldValue', placeholder: '值' }) as HTMLInputElement;
+  const addBtn = el('button', { class: 'ghost small', type: 'button', text: '＋ 加一个字段' });
+
+  const doAdd = (): void => {
+    const key = keyInput.value.trim();
+    const value = valInput.value;
+    if (key === '') {
+      keyInput.focus();
+      return;
+    }
+    if (key === 'location' || key === 'spec' || key === 'notes' || key === 'room' || key === 'container') {
+      // 这几个是固定项，别让用户以为加了个新的
+      toast('「位置」「规格」「备注」已经在上面了，换个字段名', 'warn');
+      return;
+    }
+    keyInput.value = '';
+    valInput.value = '';
+    void commit(key, value === '' ? '（空）' : value);
+  };
+
+  addBtn.addEventListener('click', doAdd);
+  valInput.addEventListener('keydown', (ev) => {
+    if ((ev as KeyboardEvent).key === 'Enter') {
+      ev.preventDefault();
+      doAdd();
+    }
+  });
+  keyInput.addEventListener('keydown', (ev) => {
+    if ((ev as KeyboardEvent).key === 'Enter') {
+      ev.preventDefault();
+      valInput.focus();
+    }
+  });
+
+  adder.append(keyInput, valInput, addBtn);
+  wrap.append(adder);
+  wrap.append(
+    el('div', {
+      class: 'muted small extra-note',
+      text: '改动在离开输入框时自动保存。自定义字段是这件东西独有的，不会影响别的物品。',
+    }),
+  );
+
+  return wrap;
 }
 
 function renderItems(view: HTMLElement): void {
@@ -2201,6 +2472,7 @@ function renderItems(view: HTMLElement): void {
 
   const t = el('table', { class: 'items' });
   const head = el('tr');
+  head.append(el('th', { class: 'col-extra', text: '' })); // 展开箭头
   head.append(el('th', { class: 'col-dot', text: '' })); // 到期状态色点，固定列
   for (const c of cols) {
     head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
@@ -2208,12 +2480,18 @@ function renderItems(view: HTMLElement): void {
   head.append(el('th', { text: '' })); // 操作列，固定
   t.append(el('thead', {}, head));
 
+  // 展开行的 colspan：箭头 + 色点 + 配置列 + 操作
+  const colSpan = cols.length + 3;
+
   const body = el('tbody');
   for (const it of state.items) {
     const tr = el('tr');
     if (it.lowStock) tr.classList.add('low-stock');
     const bulk = it.is_bulk === 'true';
     if (!bulk && it.remaining <= 0) tr.classList.add('spent');
+
+    // 展开区：默认不占地方，点开才显示
+    tr.append(el('td', { class: 'col-extra' }, extraToggle(it)));
 
     // 第一列：到期状态色点，一眼扫出哪些要处理
     const worst = it.expiry.find((e) => e.expired) ?? (it.isLongTerm ? undefined : it.expiry[0]);
@@ -2239,13 +2517,20 @@ function renderItems(view: HTMLElement): void {
 
     body.append(tr);
 
+    // ── 展开区：补充信息（位置/规格/备注 + 自定义字段）──
+    // 按需拉数据，所以只有真的展开了才发请求
+    if (state.extraOpen.has(it.uuid)) {
+      body.append(extraPanel(it, colSpan));
+    }
+
     // ── 嵌套行：批量物品配了「一组库存」时，紧跟着列出每一条 ──
     // 列数随配置变，所以用 colspan 撑一格而不是硬凑空 td
     if (bulk && it.stockCount > 1 && state.expanded.has(it.uuid)) {
       const sub = el('tr', { class: 'stock-sub' });
+      sub.append(el('td', { class: 'col-extra' }));
       sub.append(el('td', { class: 'dot muted', text: '└' }));
       const info = el('td', { class: 'muted small' });
-      info.colSpan = cols.length;
+      info.colSpan = cols.length + 1;
       info.append(
         el('span', { text: '分为 ' }),
         el('span', { class: 'mono', text: String(it.stockCount) }),
