@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 import {
   createWorkspace,
@@ -100,6 +100,10 @@ import {
   updateWorkspacePrefs,
   quarantineWorkspace,
   unquarantineWorkspace,
+  defaultDataDir,
+  isDataDirConfigured,
+  isDirWritable,
+  programDir,
   markImporting,
   workspaceStatus,
   isUsable,
@@ -108,6 +112,13 @@ import {
   resolveWorkspace,
 } from '../core/workspace';
 import { exportTableColumns } from './_helpers';
+import {
+  bootstrapPath,
+  clearBootstrap,
+  ensureBootstrapDir,
+  readBootstrap,
+  writeBootstrap,
+} from '../core/bootstrap';
 
 // ═════════════════════════════════════════════════════════════
 // 工作区状态：正常 / 导入中 / 已隔离
@@ -283,6 +294,103 @@ test('隔离的工作区仍然能导出（否则数据就拿不回来了）', ()
     });
     assert.ok(existsSync(out.archivePath), '归档生成了');
     assert.equal(out.rowCounts['items'], 1, '数据在里面');
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+// ═════════════════════════════════════════════════════════════
+// 数据目录：默认位置、可写检测、启动配置
+// ═════════════════════════════════════════════════════════════
+
+test('数据目录默认在程序目录下的 data/，且一个工作区一个子目录', () => {
+  const root = tmpRoot();
+  try {
+    // 环境变量优先，测试都靠它隔离
+    const custom = join(root, 'custom');
+    process.env['DSH_INVENTORY_HOME'] = custom;
+    assert.equal(defaultDataDir(), resolve(custom), '环境变量优先');
+    assert.equal(isDataDirConfigured(), true, '环境变量算"已配置"');
+
+    delete process.env['DSH_INVENTORY_HOME'];
+    // 不带环境变量时：要么是启动配置里的，要么是 <程序目录>/data
+    const d = defaultDataDir();
+    assert.ok(d.endsWith(join('', 'data')) || d.includes('data'), `默认目录应落在 data 下：${d}`);
+    // 程序目录应当是仓库根（含本项目的 package.json），而不是 node_modules 里那个
+    const pd = programDir();
+    assert.ok(existsSync(join(pd, 'package.json')), `程序目录应有 package.json：${pd}`);
+    assert.ok(!pd.includes('node_modules'), `不能停在 node_modules 里：${pd}`);
+    const pkg = JSON.parse(readFileSync(join(pd, 'package.json'), 'utf8')) as { name?: string };
+    assert.equal(pkg.name, 'dsh-inventory', '必须是我们自己的 package.json');
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('可写检测：普通目录可写，文件当目录不可写', () => {
+  const root = tmpRoot();
+  try {
+    const okDir = join(root, 'ok');
+    const r = isDirWritable(okDir);
+    assert.equal(r.ok, true, `普通目录应可写：${r.reason}`);
+    // 探测文件必须被清掉，不能留垃圾
+    assert.ok(!existsSync(join(okDir, '.dsh-write-probe')), '探测文件应当被删掉');
+
+    // 拿一个**文件**当目录用 —— 确定写不进去
+    const asDir = join(root, 'file-not-dir');
+    writeFileSync(asDir, 'x', 'utf8');
+    const bad = isDirWritable(asDir);
+    assert.equal(bad.ok, false, '文件当目录应当判为不可写');
+    assert.ok(bad.reason.length > 0, '要给得出原因');
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('启动配置：设置数据目录、读回、复位', () => {
+  const root = tmpRoot();
+  try {
+    // 启动配置固定落在 %LOCALAPPDATA%\<名字>，为了不污染真机把它指到临时目录
+    const fakeLocal = join(root, 'localappdata');
+    const savedLocal = process.env['LOCALAPPDATA'];
+    process.env['LOCALAPPDATA'] = fakeLocal;
+
+    const target = join(root, 'my-data');
+    assert.equal(readBootstrap().dataDir, undefined, '一开始没有配置');
+
+    writeBootstrap({ dataDir: target });
+    assert.equal(readBootstrap().dataDir, target, '写得进读得出');
+    assert.ok(readBootstrap().updatedAt, '记下时间');
+    assert.ok(existsSync(bootstrapPath()), '配置文件生成了');
+
+    // 设了之后 defaultDataDir 就该听它的
+    const savedEnv = process.env['DSH_INVENTORY_HOME'];
+    delete process.env['DSH_INVENTORY_HOME'];
+    assert.equal(defaultDataDir(), resolve(target), '配置优先于默认位置');
+    assert.equal(isDataDirConfigured(), true);
+
+    clearBootstrap();
+    assert.equal(readBootstrap().dataDir, undefined, '复位后没有配置了');
+    assert.notEqual(defaultDataDir(), resolve(target), '复位后不再指向它');
+
+    if (savedEnv !== undefined) process.env['DSH_INVENTORY_HOME'] = savedEnv;
+    if (savedLocal !== undefined) process.env['LOCALAPPDATA'] = savedLocal;
+  } finally {
+    removeTempRoot(root);
+  }
+});
+
+test('启动配置坏了不影响启动', () => {
+  const root = tmpRoot();
+  try {
+    const fakeLocal = join(root, 'localappdata');
+    const savedLocal = process.env['LOCALAPPDATA'];
+    process.env['LOCALAPPDATA'] = fakeLocal;
+    ensureBootstrapDir();
+    writeFileSync(bootstrapPath(), '{ 这不是 JSON', 'utf8');
+    // 读坏了就当没配过，而不是抛出去让整个应用起不来
+    assert.deepEqual(readBootstrap(), {});
+    if (savedLocal !== undefined) process.env['LOCALAPPDATA'] = savedLocal;
   } finally {
     removeTempRoot(root);
   }

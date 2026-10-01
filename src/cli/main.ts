@@ -19,6 +19,7 @@ import { resolve } from 'node:path';
 
 import { APP_NAME, APP_VERSION, APP_FORMAT, APP_FORMAT_VERSION } from '../core/meta';
 import { SCHEMA_VERSION } from '../core/schema';
+import { bootstrapPath, clearBootstrap, writeBootstrap } from '../core/bootstrap';
 import { ENUMS, CATEGORY_LEAD_DAYS, TABLES } from '../core/fields';
 import { exportWorkspace, exportWorkspaces } from '../core/export';
 import {
@@ -45,6 +46,9 @@ import {
   WorkspaceUnusableError,
   isUsable,
   workspaceStatus,
+  dataDirStatus,
+  isDirWritable,
+  programDir,
   quarantineWorkspace,
   unquarantineWorkspace,
 } from '../core/workspace';
@@ -720,9 +724,88 @@ function itemFacts(it: Record<string, unknown>): [string, string][] {
 // info
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * `config data-dir` —— 查看 / 设置数据目录。
+ *
+ * 这个命令存在的理由：程序若装在受保护目录里，默认位置写不进去，
+ * 而**界面本身可能起不来**（或起来也是降级态）。命令行是最后的出路。
+ * 设置写进启动配置（在数据目录之外），界面下次启动就读到了。
+ */
+function cmdConfigDataDir(args: ParsedArgs): number {
+  const target = args._[0];
+
+  if (bool(args, 'reset')) {
+    clearBootstrap();
+    const back = defaultDataDir();
+    if (out.json) emitJson({ reset: true, dataDir: back, configured: false });
+    else {
+      write(`已清除数据目录设置，回到默认位置：${back}`);
+    }
+    return EXIT.OK;
+  }
+
+  if (!target) {
+    const st = dataDirStatus();
+    const data = {
+      dataDir: st.dir,
+      writable: st.writable,
+      reason: st.reason,
+      configured: st.configured,
+      defaultDir: resolve(programDir(), 'data'),
+      fallbackDir: st.fallbackDir,
+      bootstrapPath: bootstrapPath(),
+    };
+    if (out.json) emitJson(data);
+    else {
+      printKv([
+        ['数据目录', data.dataDir],
+        ['能否写入', data.writable ? '可以' : `不可以 —— ${data.reason}`],
+        ['来源', data.configured ? '已设置（环境变量或启动配置）' : '默认（程序目录下的 data/）'],
+        ['程序目录默认值', data.defaultDir],
+        ['设置记在', data.bootstrapPath],
+      ]);
+      if (!data.writable) {
+        write('\n这个目录写不进去。换一个可写的位置：');
+        write(`  dsh-inv config data-dir "${data.fallbackDir}"`);
+      }
+    }
+    return EXIT.OK;
+  }
+
+  // 设为绝对路径：相对路径会跟着"从哪运行"漂移，配置里存绝对路径才可预期
+  const abs = resolve(target);
+  const w = isDirWritable(abs);
+  if (!w.ok) {
+    emitError(EXIT.VALIDATION, 'DataDirNotWritable', `这个目录写不进去：${w.reason}`, {
+      dir: abs,
+      reason: w.reason,
+    });
+    return EXIT.VALIDATION;
+  }
+
+  if (bool(args, 'dryRun')) {
+    if (out.json) emitJson({ dryRun: true, would: { setDataDir: abs } });
+    else write(`将把数据目录设为：${abs}`);
+    return EXIT.OK;
+  }
+
+  writeBootstrap({ dataDir: abs });
+  const created = !existsSync(resolve(abs, 'registry.json'));
+
+  if (out.json) {
+    emitJson({ dataDir: abs, bootstrapPath: bootstrapPath(), needsInit: created });
+  } else {
+    write(`数据目录已设为：${abs}`);
+    write(`设置记在：${bootstrapPath()}`);
+    if (created) write('\n这个目录还没有工作区。用 `dsh-inv init --name "我的家"` 建一个。');
+  }
+  return EXIT.OK;
+}
+
 function cmdInfo(_args: ParsedArgs, dataDir: string): number {
   const reg = readRegistry(dataDir);
   const ws = listWorkspaces(dataDir);
+  const st = dataDirStatus();
   const data = {
     app: APP_NAME,
     version: APP_VERSION,
@@ -730,6 +813,10 @@ function cmdInfo(_args: ParsedArgs, dataDir: string): number {
     schemaVersion: SCHEMA_VERSION,
     dataDir,
     dataDirIsDefault: dataDir === defaultDataDir(),
+    /** 能不能写。false 时界面整体禁用，只剩「设置数据目录」可用 */
+    dataDirWritable: st.writable,
+    dataDirReason: st.reason,
+    dataDirConfigured: st.configured,
     exists: existsSync(dataDir),
     workspaceCount: ws.length,
     activeWorkspaceId: reg.activeWorkspaceId,
@@ -748,6 +835,8 @@ function cmdInfo(_args: ParsedArgs, dataDir: string): number {
     ['归档格式', `${APP_FORMAT} v${APP_FORMAT_VERSION}`],
     ['数据结构版本', String(SCHEMA_VERSION)],
     ['数据目录', dataDir + (data.exists ? '' : '  (不存在)')],
+    ['能否写入', data.dataDirWritable ? '可以' : `不可以 —— ${data.dataDirReason}`],
+    ['目录来源', data.dataDirConfigured ? '已设置' : '默认（程序目录下的 data/）'],
     ['工作区数量', String(ws.length)],
     ['默认工作区', reg.activeWorkspaceId ?? '(未设置)'],
     ['运行环境', `Node ${process.version} · ${process.platform} ${process.arch}`],
@@ -3342,6 +3431,16 @@ interface Command {
 const COMMANDS: Command[] = [
   { path: ['info'], summary: '显示应用、数据目录与工作区概况', usage: 'info', options: [], run: cmdInfo },
   {
+    path: ['config', 'data-dir'],
+    summary: '查看 / 设置数据目录（程序目录写不进去时用）',
+    usage:
+      'config data-dir                     查看当前数据目录与可写状态\n' +
+      '       config data-dir <路径>              设置（绝对值或相对当前目录）\n' +
+      '       config data-dir --reset             回到默认（<程序目录>/data）',
+    options: [{ name: 'reset', type: 'boolean', desc: '清掉设置，回到默认位置' }],
+    run: (a, _dd) => cmdConfigDataDir(a),
+  },
+  {
     path: ['init'],
     summary: '初始化数据目录与第一个工作区',
     usage: 'init [--name <名称>] [--no-seed]',
@@ -3774,7 +3873,16 @@ export function main(argv: string[]): number {
   if (bool(args, 'json')) out.json = true;
   const dataDir = dataDirOf(args);
 
-  if (!existsSync(dataDir) && cmd.path[0] !== 'init' && cmd.path[0] !== 'info') {
+  /**
+   * 不管数据目录在不在都能跑的命令。
+   *
+   * `config data-dir` 必须在这里面：它的用途正是"把数据目录指到一个**还不存在**
+   * 的位置"（程序目录写不进去时的出路）。要是也被这条前置检查挡住，
+   * 那这个命令就永远救不了场 —— 它会被自己检查的那个条件卡死。
+   * `info` 同理，它得能报告"目录不存在"。
+   */
+  const NO_DATA_DIR_OK = new Set(['init', 'info', 'config']);
+  if (!existsSync(dataDir) && !NO_DATA_DIR_OK.has(cmd.path[0] ?? '')) {
     emitError(EXIT.NOT_FOUND, 'NoDataDir', `数据目录不存在: ${dataDir}。先运行 \`dsh-inv init\`。`, { dataDir });
     return EXIT.NOT_FOUND;
   }

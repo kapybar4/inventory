@@ -28,6 +28,12 @@ const api = {
     info: () => call('app:info'),
     schema: () => call('app:schema'),
     manifest: () => call('app:manifest'),
+    /** 弹出目录选择框，只选不改 */
+    pickDataDir: () => call('app:pickDataDir'),
+    /** 把选中的目录写进启动配置（不搬数据） */
+    setDataDir: (dir: string) => call('app:setDataDir', dir),
+    /** 回到默认数据目录 */
+    resetDataDir: () => call('app:resetDataDir'),
   },
   ws: {
     list: () => call('ws:list'),

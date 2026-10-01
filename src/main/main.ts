@@ -30,6 +30,8 @@ import {
   WorkspaceUnusableError,
   assertUsable,
   isUsable,
+  isDirWritable,
+  dataDirStatus,
   workspaceStatus,
   quarantineWorkspace,
   unquarantineWorkspace,
@@ -80,6 +82,7 @@ import { buildManifest } from '../core/manifest';
 import { formatDaysLeft, daysUntil, today } from '../core/dates';
 import { centsToYuan, yuanToCents, parseExtra, serializeExtra } from '../core/values';
 import { formatBytes } from '../core/util';
+import { bootstrapPath, clearBootstrap, writeBootstrap } from '../core/bootstrap';
 
 /**
  * 把 Chromium 的 profile 目录从**漫游** AppData 挪到**本地** AppData。
@@ -366,6 +369,22 @@ function withDb<T>(
   opts: { allowUnusable?: boolean } = {},
 ): T {
   const dd = dataDir();
+  /*
+   * 数据目录写不进去（程序装在 Program Files 里就会这样）时，**写操作直接拒绝**。
+   *
+   * 只挡写、不挡读：读还能让用户把数据导出来，那是他现在唯一的出路。
+   * 报错必须带上"怎么修" —— 光说"写不进去"等于把人困在原地。
+   */
+  if (!readOnly) {
+    const w = isDirWritable(dd);
+    if (!w.ok) {
+      throw new Error(
+        `数据目录写不进去，无法保存。\n  目录：${dd}\n  原因：${w.reason}\n` +
+          '请换一个可写的目录（界面底部「数据位置」里可以设置），' +
+          '或设环境变量 DSH_INVENTORY_HOME 指到别处。',
+      );
+    }
+  }
   const entry = resolveWorkspace(dd, wsId);
   if (!opts.allowUnusable) assertUsable(entry);
   const db = openDatabase(workspaceDbPath(dd, entry), readOnly ? { readOnly: true, skipMigrate: true } : {});
@@ -417,17 +436,67 @@ function buildExtraPayload(row: Row): {
 
 function registerHandlers(): void {
   // ── 元信息 / 静态数据 ──
-  handle('app:info', () => ({
-    name: APP_NAME,
-    version: APP_VERSION,
-    schemaVersion: SCHEMA_VERSION,
-    dataDir: dataDir(),
-    isDefaultDataDir: dataDir() === defaultDataDir(),
-    electron: process.versions.electron,
-    chrome: process.versions.chrome,
-    node: process.versions.node,
-    platform: process.platform,
-  }));
+  handle('app:info', () => {
+    const st = dataDirStatus();
+    return {
+      name: APP_NAME,
+      version: APP_VERSION,
+      schemaVersion: SCHEMA_VERSION,
+      dataDir: st.dir,
+      isDefaultDataDir: !st.configured,
+      /**
+       * 数据目录能不能用。为 false 时界面整体禁用，
+       * 只在「数据位置」那条上给出配置入口 —— 别的都做不了，也不该装作能做。
+       */
+      dataDirWritable: st.writable,
+      dataDirReason: st.reason,
+      dataDirConfigured: st.configured,
+      dataDirFallback: st.fallbackDir,
+      /** 启动配置存在哪（用户要手工排查时用得上） */
+      bootstrapPath: bootstrapPath(),
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      platform: process.platform,
+    };
+  });
+
+  /** 选一个数据目录（只选不改，改由 app:setDataDir 做） */
+  handle('app:pickDataDir', async () => {
+    const st = dataDirStatus();
+    const picked = await dialog.showOpenDialog({
+      title: '选择数据目录',
+      defaultPath: st.writable ? st.dir : st.fallbackDir,
+      properties: ['openDirectory', 'createDirectory'],
+      buttonLabel: '用这个目录',
+    });
+    if (picked.canceled || picked.filePaths.length === 0) return { canceled: true };
+    const dir = picked.filePaths[0]!;
+    // 选完立刻试写一次：让"这个目录不能用"当场暴露，而不是等用户重启才发现
+    const w = isDirWritable(dir);
+    return { canceled: false, dir, writable: w.ok, reason: w.reason };
+  });
+
+  /**
+   * 设置数据目录。
+   *
+   * 只写启动配置（存在数据目录之外），**不搬数据、不删数据** ——
+   * 目标目录里若已有数据就继续用，若是空的就当新起点。
+   * 界面上会明确写出这一点，免得用户以为原数据被迁走了。
+   */
+  handle('app:setDataDir', (dir) => {
+    const target = asString(dir, 'dir');
+    const w = isDirWritable(target);
+    if (!w.ok) throw new Error(`这个目录写不进去：${w.reason}\n${target}`);
+    writeBootstrap({ dataDir: target });
+    return { dataDir: target, bootstrapPath: bootstrapPath() };
+  });
+
+  /** 回到默认数据目录（<程序目录>/data） */
+  handle('app:resetDataDir', () => {
+    clearBootstrap();
+    return { dataDir: defaultDataDir() };
+  });
 
   handle('app:schema', () => ({
     tables: TABLES.map((t) => ({

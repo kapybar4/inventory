@@ -19,6 +19,12 @@ interface AppInfo {
   schemaVersion: number;
   dataDir: string;
   isDefaultDataDir: boolean;
+  /** 数据目录能不能写。false 时整个界面禁用，只留「数据位置」上的配置入口 */
+  dataDirWritable: boolean;
+  dataDirReason: string;
+  dataDirConfigured: boolean;
+  dataDirFallback: string;
+  bootstrapPath: string;
   electron: string;
   chrome: string;
   node: string;
@@ -323,7 +329,14 @@ interface ImportPreview {
 }
 
 interface DshApi {
-  app: { info(): Promise<AppInfo>; schema(): Promise<SchemaInfo>; manifest(): Promise<unknown> };
+  app: {
+    info(): Promise<AppInfo>;
+    schema(): Promise<SchemaInfo>;
+    manifest(): Promise<unknown>;
+    pickDataDir(): Promise<{ canceled: boolean; dir?: string; writable?: boolean; reason?: string }>;
+    setDataDir(dir: string): Promise<{ dataDir: string; bootstrapPath: string }>;
+    resetDataDir(): Promise<{ dataDir: string }>;
+  };
   ws: {
     list(): Promise<WsList>;
     create(name: string, seed: boolean): Promise<{ id: string; name: string; seeded: unknown }>;
@@ -777,6 +790,13 @@ interface ModalSpec {
   body: HTMLElement;
   actions: { label: string; kind?: 'primary' | 'danger' | 'ghost'; onClick: () => unknown }[];
   wide?: boolean;
+  /**
+   * 已经做好的按钮，直接放进操作栏**取消键的左边**。
+   *
+   * 给"按钮上要挂自己的状态"的场合用（比如数据目录那三个里，
+   * 「保存」的 disabled 由浏览结果决定，用 actions 的声明式写法够不着）。
+   */
+  extraActions?: HTMLElement[];
 }
 
 function openModal(spec: ModalSpec): void {
@@ -809,7 +829,7 @@ function openModal(spec: ModalSpec): void {
   }
   const cancel = el('button', { class: 'ghost', text: '取消' });
   cancel.addEventListener('click', close);
-  actions.append(cancel);
+  actions.append(...(spec.extraActions ?? []), cancel);
   box.append(actions);
 
   root.append(box);
@@ -1228,6 +1248,28 @@ function render(): void {
   // 只有工作区页需要固定底栏；切走时清掉，避免影响别的页面的滚动
   view.classList.remove('has-footer');
   view.classList.remove('no-pad');
+
+  /*
+   * 数据目录不可用时**整页置灰**，只留顶部那条和数据位置。
+   *
+   * 为什么不是"让用户自己看着办"：写不进去的话，任何一次保存都会失败，
+   * 而失败点散落在几十个按钮上（新增、编辑、领用、分组拖动…），
+   * 每个都弹一次错只会让人以为程序坏了。**一眼看出"还不能用，
+   * 先去设置数据目录"比逐个报错好得多。**
+   *
+   * 只读也不是出路：一个用不了的库存应用，能看不能记没有意义。
+   */
+  if (state.info && state.info.dataDirWritable === false) {
+    view.classList.add('blocked');
+    view.classList.add('has-footer');
+    // 顶栏的页签与工作区下拉也一起置灰：现在哪都去不了，别装作能点
+    document.getElementById('app')?.classList.add('is-blocked');
+    view.append(blockedState(state.info));
+    view.append(buildDataFooter(state.info));
+    return;
+  }
+  document.getElementById('app')?.classList.remove('is-blocked');
+
   if (!state.wsId && state.tab !== 'workspaces' && state.tab !== 'schema') {
     view.append(emptyState());
     return;
@@ -2798,22 +2840,96 @@ function renderWorkspaces(view: HTMLElement): void {
 }
 
 /**
+ * 数据目录不可用时的整页替身。
+ *
+ * 讲三件事：**为什么用不了**、**怎么办**、以及**数据没丢** ——
+ * 最后一条最要紧：看到程序说"目录写不进去"，第一反应通常是"我的数据完了"。
+ */
+function blockedState(info: AppInfo): HTMLElement {
+  const wrap = el('div', { class: 'blocked-state' });
+
+  wrap.append(el('div', { class: 'bs-icon', text: '!' }));
+  wrap.append(el('h2', { text: '数据目录不可用' }));
+
+  wrap.append(
+    el('p', {
+      text: '程序所在的位置写不进去（装在 Program Files 这类受保护目录里就会这样），所以现在不能记录任何东西。',
+    }),
+  );
+
+  const facts = el('div', { class: 'kv' });
+  facts.append(
+    el('span', { class: 'k', text: '当前目录' }),
+    el('span', { class: 'v mono', text: info.dataDir }),
+  );
+  if (info.dataDirReason) {
+    facts.append(
+      el('span', { class: 'k', text: '原因' }),
+      el('span', { class: 'v danger-text', text: info.dataDirReason }),
+    );
+  }
+  facts.append(
+    el('span', { class: 'k', text: '建议位置' }),
+    el('span', { class: 'v mono', text: info.dataDirFallback }),
+  );
+  wrap.append(facts);
+
+  const fix = el('button', { class: 'primary', text: '设置数据目录' });
+  fix.addEventListener('click', () => openDataDirDialog());
+  wrap.append(el('div', { class: 'bs-actions' }, fix));
+
+  wrap.append(
+    el('p', {
+      class: 'muted small',
+      text:
+        '数据不会因为这一步丢失：换目录只是换一个存放位置，' +
+        '选一个已有数据的目录就继续用那份数据。',
+    }),
+  );
+
+  return wrap;
+}
+
+/**
  * 数据位置条：**固定在内容区底部**。
  * 之前它是页面里一个普通卡片，工作区一多就被挤到屏幕外 ——
  * 而「我的数据到底存在哪」是随时可能要看的信息。
+ *
+ * 数据目录不可用时，这条是整个界面**唯一还能操作的地方**，
+ * 所以它要变醒目（`.df-blocked`）、把原因写清楚，并给出配置入口。
  */
 function buildDataFooter(info: AppInfo | null): HTMLElement {
-  const bar = el('div', { class: 'data-footer' });
+  const blocked = info !== null && info.dataDirWritable === false;
+  const bar = el('div', { class: `data-footer${blocked ? ' df-blocked' : ''}` });
 
   const left = el('div', { class: 'df-left' });
-  left.append(el('span', { class: 'df-label', text: '数据目录' }));
+  left.append(el('span', { class: 'df-label', text: blocked ? '数据目录（不可用）' : '数据目录' }));
   const path = el('code', { class: 'df-path', text: info?.dataDir ?? state.wsList?.dataDir ?? '—' });
   path.title = info?.dataDir ?? '';
   left.append(path);
   bar.append(left);
 
   const right = el('div', { class: 'df-right' });
+
+  if (blocked) {
+    // 写不进去的原因直接摊开：用户得知道是"权限"还是"盘只读"
+    if (info?.dataDirReason) {
+      right.append(el('span', { class: 'df-reason', text: info.dataDirReason }));
+    }
+    const fix = el('button', { class: 'primary small', text: '设置数据目录' });
+    fix.addEventListener('click', () => openDataDirDialog());
+    right.append(fix);
+    bar.append(right);
+    return bar;
+  }
+
   if (info) {
+    if (!info.dataDirConfigured) {
+      const move = el('button', { class: 'ghost small', text: '更改数据目录' });
+      move.title = '当前用的是程序目录下的 data/；可以换到别处';
+      move.addEventListener('click', () => openDataDirDialog());
+      right.append(move);
+    }
     right.append(
       el('span', {
         class: 'muted small',
@@ -2827,6 +2943,108 @@ function buildDataFooter(info: AppInfo | null): HTMLElement {
   bar.append(right);
 
   return bar;
+}
+
+/**
+ * 设置数据目录。
+ *
+ * 讲清楚**不会搬数据**：目标目录里已有数据就继续用，空的就当新起点。
+ * 含糊其辞会让人以为原数据被迁走了，然后去找一个其实没动过的目录。
+ */
+function openDataDirDialog(): void {
+  const info = state.info;
+  const body = el('div', { class: 'form' });
+
+  const current = el('div', { class: 'kv' });
+  current.append(
+    el('span', { class: 'k', text: '当前目录' }),
+    el('span', { class: 'v mono', text: info?.dataDir ?? '—' }),
+  );
+  if (info?.dataDirWritable === false && info.dataDirReason) {
+    current.append(
+      el('span', { class: 'k', text: '不可用原因' }),
+      el('span', { class: 'v danger-text', text: info.dataDirReason }),
+    );
+  }
+  body.append(current);
+
+  const picked = el('div', { class: 'muted small', text: '尚未选择新目录。' });
+  body.append(picked);
+
+  let chosen: string | null = null;
+
+  const choose = el('button', { class: 'small', text: '浏览…' });
+  choose.addEventListener('click', () => {
+    void (async () => {
+      try {
+        const r = await window.api.app.pickDataDir();
+        if (r.canceled || !r.dir) return;
+        if (r.writable === false) {
+          chosen = null;
+          picked.className = 'small danger-text';
+          picked.textContent = `这个目录写不进去：${r.reason ?? '未知原因'}`;
+          save.disabled = true;
+          return;
+        }
+        chosen = r.dir;
+        picked.className = 'small ok-text';
+        picked.textContent = `将使用：${r.dir}`;
+        save.disabled = false;
+      } catch (err) {
+        fail(err);
+      }
+    })();
+  });
+
+  const save = el('button', { class: 'primary', text: '保存并重新加载' });
+  save.disabled = true;
+  save.addEventListener('click', () => {
+    if (!chosen) return;
+    void (async () => {
+      try {
+        await window.api.app.setDataDir(chosen);
+        // 换了目录就等于换了一份数据，整页重载最稳 —— 免得残留上一个目录的状态
+        window.location.reload();
+      } catch (err) {
+        fail(err);
+      }
+    })();
+  });
+
+  const reset = el('button', { class: 'ghost small', text: '回到默认位置' });
+  reset.title = '默认是程序目录下的 data/';
+  reset.addEventListener('click', () => {
+    void (async () => {
+      try {
+        await window.api.app.resetDataDir();
+        window.location.reload();
+      } catch (err) {
+        fail(err);
+      }
+    })();
+  });
+
+  body.append(
+    el('p', {
+      class: 'muted',
+      text:
+        '设置只记住"数据放在哪"，不会搬运或删除任何文件。' +
+        '选一个已有数据的目录就继续用那份数据；选空目录就是从头开始。',
+    }),
+  );
+  if (info?.dataDirFallback) {
+    body.append(el('p', { class: 'muted', text: `建议：${info.dataDirFallback}` }));
+  }
+  if (info?.bootstrapPath) {
+    body.append(el('p', { class: 'muted small', text: `这个设置记在：${info.bootstrapPath}` }));
+  }
+
+  openModal({
+    title: '数据目录',
+    body,
+    actions: [],
+    extraActions: [reset, choose, save],
+  });
 }
 
 /** 编辑工作区：名称 + 说明 */
@@ -3795,6 +4013,20 @@ async function boot(): Promise<void> {
     state.schema = await window.api.app.schema();
     await loadSortFields();
     $('#app-meta').textContent = `v${state.info.version} · 数据结构 v${state.info.schemaVersion}`;
+
+    /*
+     * 数据目录不可用就**到此为止**，别再去读工作区。
+     *
+     * 只读目录下连 `ws.list()` 都会抛（打开数据库要写 `-shm`），
+     * 那样异常会被下面的 catch 兜成一句"启动失败"，用户看到的是
+     * 一个空白页加一行报错 —— 而真正该看到的是"去设置数据目录"。
+     * 所以在这里早退，直接把降级态画出来。
+     */
+    if (state.info.dataDirWritable === false) {
+      renderBanner();
+      render();
+      return;
+    }
 
     const list = await window.api.ws.list();
     if (list.workspaces.length === 0) {

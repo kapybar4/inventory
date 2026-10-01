@@ -160,6 +160,26 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   打包后代码在 `.asar` 里（不可写），改用 `dirname(process.execPath)`，即 exe 旁边。
   代价：程序若装在 `Program Files` 这类受保护目录里会写不进去，那时用
   `DSH_INVENTORY_HOME` 指到别处。这是"数据跟着程序走"的**有意取舍**。
+- **数据目录写不进去时，界面整体降级，只有「设置数据目录」能用。**
+  这不是"多一个错误提示"：写不进去的话任何一次保存都会失败，而失败点散落在
+  几十个按钮上（新增、编辑、领用、分组拖动…），逐个报错只会让人以为程序坏了。
+  一眼看出"还不能用，先去设置"比逐个报错好得多。
+  实现上有三处必须配套，少一处就退化成"空白页 + 一行报错"：
+    1. `main.ts` 的 `withDb` 里**只挡写、不挡读** —— 读还能让用户把数据导出来
+    2. 渲染层 `boot()` 在拿到 `app:info` 后**立刻判断并早退**，
+       别再去调 `ws.list()`（只读目录下它也会抛，会被兜成"启动失败"）
+    3. `#app.is-blocked` 把顶栏页签与工作区下拉一起置灰，
+       否则用户会以为还能点进去
+- **`config data-dir` 必须能在"数据目录不存在"时运行。**
+  它被设计成"程序目录写不进去时的出路"，而那个出路指向的目录**还不存在**。
+  早先它被 `main()` 里的前置检查（数据目录必须存在）挡住了 ——
+  一个命令被自己要去解决的条件卡死。现在 `init` / `info` / `config`
+  都在免检查名单里。
+- **启动配置存在数据目录之外**（`core/bootstrap.ts`，落在 `%LOCALAPPDATA%\dsh-inventory\config.json`）。
+  把钥匙锁在打不开的抽屉里没有意义：这个文件存在的唯一理由就是
+  数据目录可能写不进去。`DSH_INVENTORY_BOOTSTRAP_HOME` 可以把它整个挪走，
+  **功能测试必须设它** —— 否则测一次就往真机 `%LOCALAPPDATA%` 写一份配置，
+  而那份配置会影响真实应用下次启动去哪找数据。
 - **应用显示名（`APP_NAME`）与机器标识是两回事**。显示名可以改（现在叫 `Inventory`），
   但 `APP_FORMAT` / `REGISTRY_FORMAT` / 数据目录名里那些 `dsh-inventory-*`
   **一个字符都不能动**：改了老归档读不回来、老数据目录也找不到。
@@ -220,8 +240,8 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 96 项单元测试
-npm.cmd run test:func   # 142 项 CLI/数据层功能测试
+npm.cmd test            # 100 项单元测试
+npm.cmd run test:func   # 145 项 CLI/数据层功能测试
 npm.cmd run test:gui    # 34 步桌面端走查（要开 Electron）
 npm.cmd run test:all    # 单元 + 功能
 ```
@@ -324,7 +344,7 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、单元 96 项、CLI 142 项、往返不变式。
+**已验证**：核心功能、单元 100 项、CLI 145 项、往返不变式。
 桌面端走查的 34 步现在跑不完（见下），改界面时改用聚焦探针确认。
 
 **没验证**：

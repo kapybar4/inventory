@@ -29,8 +29,8 @@ npm.cmd start                # 桌面界面（可选）
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 96 项单元测试
-npm.cmd run test:func   # 142 项 CLI 功能测试
+npm.cmd test            # 100 项单元测试
+npm.cmd run test:func   # 145 项 CLI 功能测试
 ```
 
 > **Windows 注意**：如果执行策略禁止 `npm.ps1`，请用 `npm.cmd`
@@ -723,10 +723,17 @@ $env:ELECTRON_RUN_AS_NODE = 1
 打包后是 exe 所在目录。**不用当前工作目录** —— 双击图标启动时 cwd 可能是
 `C:\Windows\System32`，跟着它走数据会散到系统目录里。
 
-代价：程序若装在 `Program Files` 这类**受保护目录**里会写不进去。
-这时用环境变量指到别处：
+程序若装在 `Program Files` 这类**受保护目录**里会写不进去。这时应用会进入降级态：
+**整页置灰、功能全部禁用**，只在底部「数据位置」那条上高亮提示并给出设置入口 ——
+写不进去的情况下，让用户逐个去撞保存失败的报错没有意义。
+
+也可以在命令行或环境变量里指到别处：
 
 ```powershell
+# 界面里点「设置数据目录」，或命令行：
+dsh-inv config data-dir D:\我的家当
+
+# 也可以用环境变量（优先级最高）
 $env:DSH_INVENTORY_HOME = 'D:\我的家当'
 ```
 
@@ -893,8 +900,8 @@ scripts/build.mjs            编译 + 搬运静态资源
 
 ```
 npm.cmd run typecheck   # 主进程/CLI/core + 渲染层，两套 tsconfig
-npm.cmd test            # 96 项单元测试（不变量 + 回归）
-npm.cmd run test:func   # 142 项 CLI/数据层功能测试（真跑命令、核对输出）
+npm.cmd test            # 100 项单元测试（不变量 + 回归）
+npm.cmd run test:func   # 145 项 CLI/数据层功能测试（真跑命令、核对输出）
 npm.cmd run test:gui    # 34 步桌面端走查（真开 Electron，读 DOM）—— 目前会中途卡住，见「已知限制」
 npm.cmd run test:all    # 单元 + 功能
 ```

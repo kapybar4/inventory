@@ -22,6 +22,9 @@ import {
   statSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import { homedir } from 'node:os';
+
+import { readBootstrap } from './bootstrap';
 
 import { workspaceId as newWorkspaceId } from './ids';
 import { nowIso } from './dates';
@@ -158,17 +161,73 @@ export function programDir(): string {
  * 一个工作区 = `data/workspaces/<id>/` 一个子目录（每个目录一套
  * `data.db` + `meta.json` + `attachments/`），互不影响，拷贝即迁移。
  *
- * 优先级：`DSH_INVENTORY_HOME`（测试与多套数据用）→ `<程序目录>/data`。
+ * 优先级（越靠前越优先）：
+ *   1. `DSH_INVENTORY_HOME` —— 测试与"临时换一套数据"用
+ *   2. 启动配置里用户指定的目录 —— 程序目录写不进去时的出路
+ *   3. `<程序目录>/data` —— 默认
  *
- * 之前放在 `%LOCALAPPDATA%\dsh-inventory`，是为了避开"程序装在 Program Files
- * 里写不进去"这种情况。改成程序目录下是**有意的取舍**：数据跟着程序走，
- * 拷贝目录就能搬走整套数据。代价是程序若装在受保护目录里，
- * 启动时会失败 —— 这时用 `DSH_INVENTORY_HOME` 指到别处即可。
+ * 之所以要有第 2 条：程序若装在 `Program Files` 这类受保护目录里，
+ * 第 3 条会写不进去。那时不能只是"报个错就算了" —— 用户得有条出路，
+ * 而配置这件事本身必须存在数据目录**之外**（见 core/bootstrap.ts）。
  */
 export function defaultDataDir(): string {
   const env = process.env['DSH_INVENTORY_HOME'];
   if (env && env.trim()) return resolve(env.trim());
+  const configured = readBootstrap().dataDir;
+  if (configured) return resolve(configured);
   return join(programDir(), 'data');
+}
+
+/** 数据目录是不是"用户显式配的"（环境变量或启动配置） */
+export function isDataDirConfigured(): boolean {
+  const env = process.env['DSH_INVENTORY_HOME'];
+  if (env && env.trim()) return true;
+  return Boolean(readBootstrap().dataDir);
+}
+
+/**
+ * 目录能不能写。
+ *
+ * 真去写一个探测文件再删掉，而不是看权限位 —— Windows 上的
+ * `Program Files`、被组策略管的目录、只读挂载盘，光看 ACL 很容易判错。
+ * 只读检查会短暂创建 `.dsh-write-probe`，随即删除。
+ */
+export function isDirWritable(dir: string): { ok: boolean; reason: string } {
+  const probe = join(dir, '.dsh-write-probe');
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(probe, 'probe', 'utf8');
+    unlinkSync(probe);
+    return { ok: true, reason: '' };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** 数据目录当前是否可用（能建能写） */
+export function dataDirStatus(): {
+  dir: string;
+  writable: boolean;
+  reason: string;
+  configured: boolean;
+  fallbackDir: string;
+} {
+  const dir = defaultDataDir();
+  const w = isDirWritable(dir);
+  return {
+    dir,
+    writable: w.ok,
+    reason: w.reason,
+    configured: isDataDirConfigured(),
+    // 程序目录写不进去时，"换个地方"该往哪指 —— 给用户一个现成的建议
+    fallbackDir: suggestedDataDir(),
+  };
+}
+
+/** 建议的数据目录：用户主目录下一个明确的位置 */
+export function suggestedDataDir(): string {
+  const home = process.env['USERPROFILE'] ?? process.env['HOME'] ?? homedir();
+  return join(home, 'DSH-Inventory-Data');
 }
 
 export function registryPath(dataDir: string): string {
