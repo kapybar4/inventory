@@ -678,6 +678,28 @@ function viewHead(title: string, ...right: (Node | string)[]): HTMLElement {
   return head;
 }
 
+/**
+ * 标题旁边的悬停说明：一个圆圈 `?`，鼠标移上去浮出一段文字。
+ *
+ * 为什么不用原生 `title`：它是系统画的方角白框，在纯黑主题里像从别的
+ * 程序里掉出来的。这个提示是**唯一**的载体（原文已经不在页面上了），
+ * 所以更不能用那个。
+ *
+ * 浮层用 `position: absolute` 挂在 `.tip` 里，不占布局 ——
+ * 否则一句话会把标题那一行撑开，等于没挪走。
+ * 纯 CSS 显示（`:hover` / `:focus-within`），不写 JS：
+ * 它是"看一眼"的东西，为它维护一份开关状态不值得。
+ * 键盘也要能触发（`:focus-within`），不然只有鼠标用户看得到。
+ */
+function hoverTip(text: string): HTMLElement {
+  const wrap = el('span', { class: 'tip' });
+  // 用 button：它天生可聚焦、可被读屏软件念出来，不用自己补 tabindex
+  const dot = el('button', { class: 'tip-dot', type: 'button', text: '?' });
+  dot.setAttribute('aria-label', text);
+  wrap.append(dot, el('span', { class: 'tip-text', text }));
+  return wrap;
+}
+
 /** 所有表格都套一层，才能有粘性表头与独立滚动 */
 function tableWrap(t: HTMLElement): HTMLElement {
   const wrap = el('div', { class: 'table-wrap' });
@@ -3165,10 +3187,17 @@ function renderWorkspaces(view: HTMLElement): void {
   scroll.append(
     viewHead(
       '工作区',
-      el('span', {
-        class: 'muted small',
-        text: '每个工作区是一个独立的 SQLite 文件，互相隔离',
-      }),
+      /*
+       * "每个工作区是一个独立的 SQLite 文件"这句挪进悬停提示。
+       *
+       * 它是看两次就记住的东西，却和标题一样重地占着那一行 ——
+       * 标题旁边应该只有"当前状态"，不是说明书。
+       *
+       * 提示用**自己画的浮层**（`.tip-text`），不用原生 `title`：
+       * 原生提示是系统画的方角白框，跟这套纯黑主题不是一回事
+       * （这条在 AGENTS.md 里记着）。
+       */
+      hoverTip('每个工作区是一个独立的 SQLite 文件，互相隔离'),
     ),
   );
 

@@ -350,10 +350,21 @@ td,
 
 /* ───────────────────── 数据位置条（固定底部） ───────────────────── */
 
+/*
+ * 底栏（数据位置条）横跨整页宽度，所以 `#view` 在两个方向上的内边距都要让开:
+ *   - 上下：底栏要贴住窗口下沿
+ *   - 左右：**这一条是修出来的 bug** —— 原来只清了 `padding-bottom`，
+ *     左右各留 16px，于是底栏比页面内容窄一圈，左右露出两条缝，
+ *     看着像"另外一层贴在上面"。内边距改挂在 `.view-scroll` 上，
+ *     内容照样有边距，底栏则是通宽的。
+ *
+ *   注意 `render()` 切换页面时会 remove 掉 `has-footer`，
+ *   所以那条 32px 的下内边距由这里覆盖，不用在别处再补。
+ */
 #view.has-footer {
   display: flex;
   flex-direction: column;
-  padding-bottom: 0;
+  padding: 0;
 }
 
 #view.has-footer .view-scroll {
@@ -1537,6 +1548,76 @@ td.seq {
   gap: 10px;
   margin-bottom: 14px;
   flex-wrap: wrap;
+}
+
+/*
+ * 标题旁边的悬停说明（见 app.ts 的 hoverTip）。
+ *
+ * 浮层用绝对定位，不参与布局 —— 否则那句说明照样把标题行撑开，
+ * 等于没从页面上挪走。
+ *
+ * 不用原生 `title`：那是系统画的方角白框，跟这套纯黑主题不是一回事。
+ * 这里自己画，形状、配色、圆角都跟应用其余部分一致。
+ */
+.tip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.tip-dot {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 10px;
+  line-height: 1;
+  cursor: help;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.tip-dot:hover,
+.tip:focus-within .tip-dot {
+  color: var(--fg);
+  border-color: var(--fg-dim);
+}
+
+.tip-text {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: -6px;
+  z-index: 40;
+  width: max-content;
+  max-width: 320px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.65;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.6);
+  /* 默认藏起来用 visibility 而不是 display：display 没有过渡，
+     而且会让下面的 :hover 判定在移入浮层时抖一下 */
+  visibility: hidden;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: opacity 0.13s ease, transform 0.13s ease, visibility 0.13s;
+  pointer-events: none;
+}
+
+.tip-dot:hover + .tip-text,
+.tip:focus-within .tip-text {
+  visibility: visible;
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .view-title {
