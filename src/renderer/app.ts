@@ -1449,8 +1449,20 @@ function renderDashboard(view: HTMLElement): void {
 function restockTable(rows: RestockRow[]): HTMLElement {
   const t = el('table');
   const head = el('tr');
-  for (const h of ['名称', '分类', '剩余', '最低库存']) head.append(el('th', { text: h }));
-  head.append(el('th', { class: 'right', text: '缺口' }));
+  /*
+   * 数值列的表头**必须与它的值同一边**。
+   *
+   * 表头默认贴左、值右对齐的话，两者会各自贴住所在列的两端 ——
+   * 列一宽（自动布局下经常很宽）就能差出几百像素，
+   * 看起来像"列宽算错了"，实际是贴的边不同。
+   *
+   * 注意「剩余」**不**属于这一类：它的值左边是进度条（`stockBar`），
+   * 进度条是一条贴着左侧、长度表示数量的图形，所以那一列两边都靠左。
+   * 只有纯数字的「最低库存」「缺口」右对齐，与下面的数字连成一条右边缘。
+   */
+  for (const h of ['名称', '分类']) head.append(el('th', { text: h }));
+  head.append(el('th', { text: '剩余' }));
+  for (const h of ['最低库存', '缺口']) head.append(el('th', { class: 'right', text: h }));
   t.append(el('thead', {}, head));
 
   const body = el('tbody');
@@ -1965,11 +1977,12 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
   const head = el('tr');
   if (draggable) head.append(el('th', { class: 'seq', text: '' }));
   head.append(el('th', { class: 'col-extra', text: '' }));
-  head.append(el('th', { class: 'seq', text: '#' }));
+  head.append(el('th', { class: 'seq right', text: '#' }));
   for (const c of cols) {
     head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
   }
-  head.append(el('th', { text: '' }));
+  // 操作列：值是 `.ops`（右对齐），表头也跟着右对齐（见 restockTable 上的说明）
+  head.append(el('th', { class: 'right', text: '' }));
   t.append(el('thead', {}, head));
 
   // colspan：手柄(可选) + 展开箭头 + 位次 + 配置列 + 操作
@@ -3047,7 +3060,7 @@ function renderItems(view: HTMLElement): void {
   for (const c of cols) {
     head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
   }
-  head.append(el('th', { text: '' })); // 操作列，固定
+  head.append(el('th', { class: 'right', text: '' })); // 操作列，固定（值是 .ops，右对齐）
   t.append(el('thead', {}, head));
 
   // 展开行的 colspan：箭头 + 色点 + 配置列 + 操作
@@ -3165,9 +3178,26 @@ function renderWorkspaces(view: HTMLElement): void {
 
   const t = el('table');
   const hrow = el('tr');
-  for (const h of ['', '名称', '说明', '待办', '物品', '流水', '来源', '创建时间', '大小', '完整性', '']) {
-    hrow.append(el('th', { text: h }));
-  }
+  // 列的顺序必须与下面数据行 append 的顺序一致：
+  // 当前标记 · 名称 · 说明 · 待办 · 物品 · 流水 · 来源 · 创建时间 · 大小 · 完整性 · 操作
+  hrow.append(el('th', { text: '' })); // 当前标记
+  hrow.append(el('th', { text: '名称' }));
+  hrow.append(el('th', { text: '说明' }));
+  /*
+   * 数值列的表头与它的值同一边（右对齐）。
+   * 表头贴左、值贴右的话，两者会各自贴住列的两端 ——
+   * 列一宽就能差出几百像素，看起来像"列宽算错了"。
+   * 详见 restockTable 上的说明。
+   */
+  for (const h of ['待办', '物品', '流水']) hrow.append(el('th', { class: 'right', text: h }));
+  hrow.append(el('th', { text: '来源' }));
+  hrow.append(el('th', { text: '创建时间' }));
+  hrow.append(el('th', { class: 'right', text: '大小' }));
+  // 「完整性」的值是 ✓ ok / ✖ 异常 居中显示，表头也就不右对齐
+  hrow.append(el('th', { text: '完整性' }));
+  // 空表头 + 空的 ops 单元格，这个 `right` 只是把"两边的对齐方式"写一致，
+  // 免得以后有人给操作列加文字时又踩到表头贴左、内容贴右
+  hrow.append(el('th', { class: 'right', text: '' }));
   t.append(el('thead', {}, hrow));
 
   const body = el('tbody');
@@ -3236,8 +3266,7 @@ function renderWorkspaces(view: HTMLElement): void {
 
     const ops = el('td', { class: 'ops' });
     const editBtn = el('button', { class: 'ghost small', text: '编辑' });
-    editBtn.title = '修改名称与说明';
-    editBtn.addEventListener('click', () => openEditWorkspace(w));
+    editBtn.title = '修改名称与说明';    editBtn.addEventListener('click', () => openEditWorkspace(w));
 
     const exp = el('button', { class: 'ghost small', text: '导出' });
     exp.addEventListener('click', () => void doExport(w.id));
@@ -3644,7 +3673,12 @@ function renderItemDetail(): void {
     );
     const st = el('table', { class: 'stock-table' });
     const sh = el('tr');
-    for (const h of ['组', '数量', '到期', '剩余时间', '购买', '渠道', '']) sh.append(el('th', { text: h }));
+    // 列顺序与下面的数据行一致。「数量」是数值列：表头与值都右对齐
+    // （见 restockTable 上的说明 —— 分贴两端在宽列里能差出约 250px）
+    sh.append(el('th', { text: '组' }));
+    sh.append(el('th', { class: 'right', text: '数量' }));
+    for (const h of ['到期', '剩余时间', '购买', '渠道']) sh.append(el('th', { text: h }));
+    sh.append(el('th', { class: 'right', text: '' })); // 操作列（值是 .ops，右对齐）
     st.append(el('thead', {}, sh));
     const sb = el('tbody');
     for (const s of d.stocks) {
@@ -3752,7 +3786,11 @@ function renderItemDetail(): void {
     body.append(sectionTitle('出入库流水', `${d.moves.length} 条`));
     const mt = el('table');
     const mh = el('tr');
-    for (const h of ['日期', '变化', '原因', '备注']) mh.append(el('th', { text: h }));
+    // 列顺序与下面的数据行一致。「变化」是数值列（+3 / -1），
+    // 表头与值同边右对齐（见 restockTable 上的说明）
+    mh.append(el('th', { text: '日期' }));
+    mh.append(el('th', { class: 'right', text: '变化' }));
+    for (const h of ['原因', '备注']) mh.append(el('th', { text: h }));
     mt.append(el('thead', {}, mh));
     const mb = el('tbody');
     for (const m of d.moves) {
