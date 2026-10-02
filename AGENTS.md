@@ -243,13 +243,6 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   它是按合成帧给的，不是按调用时刻。验证动画要读
   `getComputedStyle` 的中间值（`grid-template-rows`、`transform`），
   截屏只能看"最终态对不对"。
-- **分类收起时，组标题的四个角都要圆。**
-  展开时标题下方两角是直角（与表格接成一块），收起时下面什么都没了，
-  还留直角就成了一块"缺了下半截"的方角。
-  用 `.group-section:not(:has(> .group-body)) > .group-head` 判断 ——
-  收起时渲染层根本不生成 `.group-body`（见 renderGroupNode），
-  所以"没有它就等于收起了"，**不需要再加一个 collapsed 类去同步状态**
-  （多一份状态就多一处会不同步的地方）。
 - **改分组层级时，记得清理依赖层级的旧逻辑。**
   「全部收起」原来收集的是"**有子组**的节点"（`n.children.length > 0`），
   那是给二级/三级分组准备的。分组固定一级之后所有组的 `children` 都是空的，
