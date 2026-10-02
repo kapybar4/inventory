@@ -680,9 +680,15 @@ td.clickable:hover .link {
   grid-column: 1 / -1;
 }
 
+/*
+ * 简版复选框（工具栏里的「排序」「只看已过期」）。
+ *
+ * 原来带一个 `margin-top: 3px`：那是给**表单里**居中用的补偿。
+ * 放进工具栏后这 3px 反而让复选框比旁边的文字低一截、和旁边的下拉也不对齐。
+ * 工具栏是 `align-items: center` 的 flex 行，不需要这种手工补偿。
+ */
 .check.mini {
   font-size: 11.5px;
-  margin-top: 3px;
 }
 
 /* ───────────────────────── 主区 ───────────────────────── */
@@ -1301,11 +1307,24 @@ tbody tr.stock-sub td {
    * 早先这里写的是 `border-radius: 0`，把基础规则整个盖掉 —— 于是悬停时
    * 露出一块方角矩形，紧挨着一个圆角表格，很割裂。
    *
-   * 半径与 `.group-section > .table-wrap` 保持一致，外轮廓才连得上。
+   * 半径与 `.group-body > .table-wrap` 保持一致，外轮廓才连得上。
    */
   border-radius: var(--r) var(--r) 0 0;
   padding-top: 10px;
   padding-bottom: 8px;
+}
+
+/*
+ * 收起时，标题自己就是这一块的全部 —— 下方两角也要圆。
+ *
+ * 展开时标题下面是表格，所以下方两角是直角（与表格接成一块）；
+ * 收起时下面什么都没有了，还留着直角就变成一块"缺了下半截"的方角。
+ * 用 `:not(:has(> .group-body))` 判断：收起时渲染层根本不生成
+ * `.group-body`（见 renderGroupNode），所以"没有它就等于收起了"，
+ * 不需要再加一个 collapsed 类去同步状态。
+ */
+.group-section:not(:has(> .group-body)) > .group-head {
+  border-radius: var(--r);
 }
 
 .group-head .caret {
@@ -1461,13 +1480,6 @@ td.seq {
   font-variant-numeric: tabular-nums;
   text-align: right;
   padding-right: 6px;
-}
-
-.sort-switch {
-  padding: 3px 9px 3px 7px;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: var(--bg-2);
 }
 
 /* ───────────────────────── 主区 ───────────────────────── */
@@ -1965,6 +1977,47 @@ th.right {
   margin-bottom: 12px;
   flex-wrap: wrap;
   align-items: center;
+}
+
+/*
+ * 工具栏里的弹性空隙：把「筛选与排序」和「视图动作」分成两拨。
+ *
+ * 挤成一排时，右边那些按钮和左边的下拉看起来是同一类东西，
+ * 眼睛要逐个读才知道哪个是筛、哪个是排序、哪个是动作。
+ * 一道空隙就能看出"左边这组管看什么，右边这组管怎么看"。
+ */
+.tb-gap {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
+/*
+ * 排序字段下拉的容器。
+ *
+ * 手动顺序下这里是**一句说明**而不是一个禁用的下拉 ——
+ * 灰掉的下拉看起来像"坏掉了"，而一句"拖动行首手柄调整顺序"
+ * 既说清了当前状态，也说了能做什么。
+ */
+.sort-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/*
+ * 工具栏里的复选框：定死尺寸并统一基线。
+ *
+ * 浏览器默认的 checkbox 尺寸随字体、随平台变，和旁边的文字对不齐；
+ * 这一行的开关（排序、只看已过期）做成一样大才像一组。
+ */
+.mini-check {
+  width: 13px;
+  height: 13px;
+  min-width: 13px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
 }
 
 .row {

@@ -1627,53 +1627,34 @@ function renderGroups(view: HTMLElement): void {
    */
 
   // ── 工具栏 ──
+  //
+  // 排布：分类筛选 → 排序 → （弹性空隙）→ 只看已过期 → 全部收起/展开。
+  //
+  // 原来这一行堆了九样东西，而且大部分是**噪音**：
+  //   - 「按分类分组」标签：分组层级已经取消选择器、固定一级，这句是废话
+  //   - 一段常驻的说明文字（"拖动行首的手柄可以固定顺序"）：占了最宽的一块，
+  //     却是看两次就记住的东西 —— 挪进 tooltip
+  //   - 「开启排序」做成描边按钮样式，视觉重量和旁边真正的按钮一样，
+  //     让人分不清哪个是开关哪个是动作
+  // 现在：标签去掉、说明进 tooltip、开关统一成朴素复选框，
+  // 并用一段弹性空隙把「筛选/排序」和「视图动作」分成两拨。
   const bar = el('div', { class: 'toolbar' });
 
   /*
-   * 分组层级选择器（1 级 / 2 级 / 3 级）已去掉，**只按分类分一级**。
+   * 当前可见的分组（分类筛选生效时只有一个）。
    *
-   * 二级（子类）和三级（标签）看起来是"更细的视角"，实际用起来
-   * 只是把同一批东西拆成更多更小的组，每组两三行 —— 翻起来比一级更累，
-   * 而且分组一多，"哪一组该先处理"反而看不出来了。
-   * 标签尤其糟：一个物品有多个标签就会出现在多个组里，
-   * 同一个东西重复出现让人怀疑是不是记了两遍。
-   *
-   * 分类、子类、标签这三个字段**都还在**（导出、搜索、展开区照样用），
-   * 只是不再拿来切分组的层级。
+   * 提前算：工具栏要用它来决定「全部收起」收集哪些键、要不要出现。
+   * 注意这里收的是**可见的组**，不是"有子组的节点" —— 见下面那段说明。
    */
-  bar.append(el('span', { class: 'tl-label', text: '按分类分组' }));
+  const roots = state.categoryFilter
+    ? tree.groups.filter((g) => g.key === state.categoryFilter)
+    : tree.groups;
 
-  // 排序开关 + 字段
-  const sortBox = el('label', { class: 'check mini sort-switch' });
-  const sortOn = el('input', { type: 'checkbox' }) as HTMLInputElement;
-  sortOn.checked = state.sortField !== 'manual';
-  sortBox.append(sortOn, el('span', { text: '开启排序' }));
-  sortBox.title = '开启后按字段排序，物品不可拖动；关闭则回到你拖动固定的顺序';
-  bar.append(sortBox);
-
-  const sortSel = select(
-    'sortField',
-    state.sortFields.map((f) => ({ value: f.key, label: f.label })),
-    state.sortField,
-  );
-  sortSel.disabled = state.sortField === 'manual';
-  const applySort = (field: string): void => {
-    state.sortField = field;
-    void savePrefs({ sort: field });
-    void loadGroupTree().then(render);
-  };
-  sortOn.addEventListener('change', () => applySort(sortOn.checked ? 'expiry' : 'manual'));
-  sortSel.addEventListener('change', () => applySort(sortSel.value));
-  bar.append(sortSel);
-
-  if (state.sortField !== 'manual') {
-    const def = state.sortFields.find((f) => f.key === state.sortField);
-    if (def) bar.append(el('span', { class: 'muted small', text: def.hint }));
-  } else {
-    bar.append(el('span', { class: 'muted small', text: '拖动行首的手柄可以固定顺序' }));
-  }
-
-  // 分类筛选（只看某一级分组）
+  /*
+   * 分类筛选放最前面：它是这一页最常动的东西（"只看药品"），
+   * 而且分组页的第一个决策就是"看哪一组"。原来它夹在排序和按钮之间，
+   * 想看药品得先在一堆控件里找它。
+   */
   if (tree.groups.length > 1) {
     const catSel = select(
       'groupCat',
@@ -1687,8 +1668,55 @@ function renderGroups(view: HTMLElement): void {
     bar.append(catSel);
   }
 
+  // 排序：开关 + 字段。关掉字段下拉时它本来就不起作用，留着只会让人多点一次
+  const sortOn = el('input', { type: 'checkbox', class: 'mini-check' }) as HTMLInputElement;
+  sortOn.checked = state.sortField !== 'manual';
+  const sortOnBox = el('label', { class: 'check mini' });
+  sortOnBox.append(sortOn, el('span', { text: '排序' }));
+  sortOnBox.title = '开启后按字段排序，物品不可拖动；关闭则回到你拖动固定的顺序';
+  bar.append(sortOnBox);
+
+  const sortWrap = el('span', { class: 'sort-field' });
+  const sortSel = select(
+    'sortField',
+    state.sortFields.map((f) => ({ value: f.key, label: f.label })),
+    state.sortField,
+  );
+  const manual = state.sortField === 'manual';
+  sortSel.disabled = manual;
+  const applySort = (field: string): void => {
+    state.sortField = field;
+    void savePrefs({ sort: field });
+    void loadGroupTree().then(render);
+  };
+  sortOn.addEventListener('change', () => applySort(sortOn.checked ? 'expiry' : 'manual'));
+  sortSel.addEventListener('change', () => applySort(sortSel.value));
+
+  if (manual) {
+    /*
+     * 手动顺序下不给一个禁用的下拉 —— 那看起来像"坏掉了"。
+     * 换成一句说明当前状态的话，并把它自己当 tooltip 的载体：
+     * 怎么拖、拖哪里，悬停即得，不常驻占地方。
+     */
+    const manualHint = el('span', { class: 'muted small', text: '拖动行首手柄调整顺序' });
+    manualHint.title = '排序关闭时按你拖动固定下来的顺序排列，可以继续拖';
+    sortWrap.append(manualHint);
+  } else {
+    sortWrap.append(sortSel);
+    const def = state.sortFields.find((f) => f.key === state.sortField);
+    if (def) {
+      const hint = el('span', { class: 'muted small', text: def.hint });
+      hint.title = def.hint;
+      sortWrap.append(hint);
+    }
+  }
+  bar.append(sortWrap);
+
+  // 弹性空隙：把"筛选与排序"和"视图动作"分成两拨，右边那组贴右
+  bar.append(el('span', { class: 'tb-gap' }));
+
   const onlyExpired = el('label', { class: 'check mini' });
-  const oeBox = el('input', { type: 'checkbox' }) as HTMLInputElement;
+  const oeBox = el('input', { type: 'checkbox', class: 'mini-check' }) as HTMLInputElement;
   oeBox.checked = state.groupOnlyExpired;
   oeBox.addEventListener('change', () => {
     state.groupOnlyExpired = oeBox.checked;
@@ -1697,36 +1725,38 @@ function renderGroups(view: HTMLElement): void {
   onlyExpired.append(oeBox, el('span', { text: '只看已过期' }));
   bar.append(onlyExpired);
 
-
-  const collapseAll = el('button', { class: 'ghost small', text: '全部收起' });
-  collapseAll.addEventListener('click', () => {
-    const all: string[] = [];
-    const walk = (ns: GroupNode[]): void => {
-      for (const n of ns) {
-        if (n.children.length > 0) all.push(pathKey(n.path));
-        walk(n.children);
-      }
-    };
-    walk(tree.groups);
-    state.collapsed = new Set(all);
-    void savePrefs({ collapsed: [...state.collapsed] });
-    render();
-  });
-  const expandAll = el('button', { class: 'ghost small', text: '全部展开' });
-  expandAll.addEventListener('click', () => {
-    state.collapsed = new Set();
-    void savePrefs({ collapsed: [] });
-    render();
-  });
-  bar.append(collapseAll, expandAll);
+  /*
+   * 全部收起 / 展开合成一个 toggle。
+   *
+   * 两个按钮摆在一起，任何时刻总有一个是没用的（全展开时"全部展开"无事可做）。
+   * 一个按钮按当前状态换文案更省地方，也更直接地表达"这是同一件事的两面"。
+   *
+   * ── 曾经坏在这里 ──
+   * 原来收集的是"**有子组**的节点"（`n.children.length > 0`）——
+   * 那是给二级/三级分组准备的。分组固定一级之后，所有组的 `children` 都是空的，
+   * 收集结果是个**空数组**，于是这个按钮点了什么都不发生：
+   * 没有报错、按钮也不禁用，就是没反应。
+   * 现在收**当前可见的每一个组**，与层级无关。
+   */
+  const allKeys = roots.map((n) => pathKey(n.path));
+  const allCollapsed = allKeys.length > 0 && allKeys.every((k) => state.collapsed.has(k));
+  if (allKeys.length > 0) {
+    const collapseBtn = el('button', {
+      class: 'ghost small',
+      text: allCollapsed ? '全部展开' : '全部收起',
+    });
+    collapseBtn.title = allCollapsed ? '展开所有分组' : '收起所有分组';
+    collapseBtn.addEventListener('click', () => {
+      state.collapsed = allCollapsed ? new Set() : new Set(allKeys);
+      void savePrefs({ collapsed: [...state.collapsed] });
+      render();
+    });
+    bar.append(collapseBtn);
+  }
 
   view.append(bar);
 
-  // ── 树 ──
-  const roots = state.categoryFilter
-    ? tree.groups.filter((g) => g.key === state.categoryFilter)
-    : tree.groups;
-
+  // ── 树 ──（roots 已在工具栏之前算好）
   let shown = 0;
   for (const node of roots) {
     const sec = buildGroupNode(node, 0);
