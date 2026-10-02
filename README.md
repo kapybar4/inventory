@@ -32,7 +32,7 @@ release/Inventory/
 几点值得说明的：
 
 - **第一次打开是空的**，没有任何示例数据 —— 自己点「新建工作区」开始记。
-  （`init` 默认会塞演示数据，那是给开发和试用用的；打包流程不调它。）
+  新建工作区一律是空的（不管从界面还是命令行），想要示例数据见下面的 `ws seed`。
 - **`data/` 就在 exe 旁边。** 这是刻意的取舍：整个文件夹拷到 U 盘、
   换个电脑，数据和程序一起走，不用重新配置路径。
   代价是**别把它放进 `Program Files`** —— 那里写不进去，
@@ -64,7 +64,8 @@ npm.cmd install              # 依赖只有 typescript / electron / electron-bui
 npm.cmd run build            # 编译到 dist/
 
 npm.cmd run cli -- --help    # 命令行工具（功能与界面完全对等）
-npm.cmd run cli -- init --name "我的家"        # 首次初始化（默认写入演示数据）
+npm.cmd run cli -- init --name "我的家"        # 首次初始化（工作区是空的）
+npm.cmd run cli -- ws seed                     # 想要示例数据就跑这条（可选）
 npm.cmd run cli -- alert list                  # 看看快到期的东西
 
 npm.cmd start                # 桌面界面（可选）
@@ -75,7 +76,7 @@ npm.cmd start                # 桌面界面（可选）
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
 npm.cmd test            # 109 项单元测试
-npm.cmd run test:func   # 147 项 CLI 功能测试
+npm.cmd run test:func   # 149 项 CLI 功能测试
 ```
 
 > **Windows 注意**：如果执行策略禁止 `npm.ps1`，请用 `npm.cmd`
@@ -97,7 +98,8 @@ npm.cmd run cli -- alert list
 ### 这个仓库里没有任何真实数据
 
 `DSH_INVENTORY_HOME` 默认指向**程序目录下的 `data\`**，见「数据布局」。
-仓库自带的演示数据是程序生成的虚构物品（`src/core/seed.ts`），
+**新建的工作区一律是空的**；仓库里那份演示数据是程序生成的虚构物品
+（`src/core/seed.ts`），只有你显式跑 `ws seed` 才会写进去。
 `.gitignore` 也把 `_demo/`、`*.db`、`*.zip` 全部排除。
 
 如果你 fork 后要提交，先确认 `git status` 里没有自己的 `data.db` 与导出归档 ——
@@ -621,18 +623,18 @@ $ dsh-inv alert list --within 30
 
 ```
 dsh-inv info                                  应用与数据目录概况
-dsh-inv init [--name 名称] [--no-seed]        初始化数据目录与第一个工作区
+dsh-inv init [--name 名称]                    初始化数据目录与第一个工作区（空的）
 
 工作区
   ws list                                     列出所有工作区
-  ws create --name 名称 [--seed]              新建工作区
+  ws create --name 名称                       新建工作区（空的）
   ws show [工作区]                            详情 + 提醒摘要
   ws stats [工作区]                           按分类 / 状态 / 房间分布、金额合计
   ws verify [工作区]                          完整性 / 外键 / 结构版本自检
   ws use <工作区>                             设为默认
   ws rename <工作区> <新名称>                 重命名
   ws rm <工作区> --yes                        删除（默认先留数据库快照）
-  ws seed [工作区]                            写入演示数据
+  ws seed [工作区]                            往**空**工作区写入演示数据（17 件物品）
 
 物品（一行 = 一件实际存在的东西）
   item add --name 名称 [字段选项]             新增（--brand/--model/--spec 均选填）
@@ -970,7 +972,7 @@ scripts/build.mjs            编译 + 搬运静态资源
 ```
 npm.cmd run typecheck   # 主进程/CLI/core + 渲染层，两套 tsconfig
 npm.cmd test            # 109 项单元测试（不变量 + 回归）
-npm.cmd run test:func   # 147 项 CLI/数据层功能测试（真跑命令、核对输出）
+npm.cmd run test:func   # 149 项 CLI/数据层功能测试（真跑命令、核对输出）
 npm.cmd run test:gui    # 34 步桌面端走查（真开 Electron，读 DOM）—— 目前会中途卡住，见「已知限制」
 npm.cmd run test:all    # 单元 + 功能
 ```

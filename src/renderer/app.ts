@@ -322,7 +322,7 @@ interface DshApi {
   };
   ws: {
     list(): Promise<WsList>;
-    create(name: string, seed: boolean): Promise<{ id: string; name: string; seeded: unknown }>;
+    create(name: string): Promise<{ id: string; name: string }>;
     use(id: string): Promise<{ id: string; name: string }>;
     rename(id: string, name: string): Promise<{ id: string; name: string }>;
     /** 改名称与备注 */
@@ -331,7 +331,6 @@ interface DshApi {
       patch: { name?: string; notes?: string },
     ): Promise<{ id: string; name: string; notes: string; source: string; sourceLabel: string }>;
     remove(id: string): Promise<{ id: string; name: string; snapshotPath: string | null }>;
-    seed(id: string): Promise<unknown>;
     stats(id?: string): Promise<WsStats>;
     verify(id?: string): Promise<unknown>;
   };
@@ -4052,11 +4051,15 @@ function openItemForm(uuid: string | null): void {
 function openNewWorkspace(): void {
   const body = el('div', { class: 'form' });
   body.append(field('工作区名称 *', input('name', '', 'text', '如 自己家 / 父母家 / 办公室')));
-  const seedBox = el('input', { type: 'checkbox', name: 'seed' }) as HTMLInputElement;
-  seedBox.checked = true;
-  const seedWrap = el('label', { class: 'check' });
-  seedWrap.append(seedBox, el('span', { text: '写入演示数据（17 件物品，含各种到期情况，便于先看看效果）' }));
-  body.append(seedWrap);
+  /*
+   * 这里原来还有个「写入演示数据」勾选框（默认勾着）。
+   *
+   * 去掉的理由：新建工作区是**用户要装自己东西**的时刻，
+   * 默认塞 17 件虚构物品进去，第一件事就变成"先删掉这些不认识的东西" ——
+   * 而删的过程还要一件件确认，比空着难受得多。
+   * 想看效果的人不缺入口：命令行 `dsh-inv ws seed <工作区>` 专门做这件事，
+   * 而且它要求工作区是空的，不会污染已有的数据。
+   */
   body.append(
     el('p', {
       class: 'muted',
@@ -4077,7 +4080,7 @@ function openNewWorkspace(): void {
             toast('请填写名称', 'warn');
             return;
           }
-          const res = await window.api.ws.create(v['name'].trim(), seedBox.checked);
+          const res = await window.api.ws.create(v['name'].trim());
           toast(`工作区「${res.name}」已创建`);
           $('#modal-root').classList.add('hidden');
           state.wsId = res.id;

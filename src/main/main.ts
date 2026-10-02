@@ -79,7 +79,6 @@ import {
 } from '../core/bulk';
 import { exportWorkspace, exportWorkspaces } from '../core/export';
 import { importArchive, importAnything, previewArchive, detectMultiArchive } from '../core/import';
-import { seedWorkspace } from '../core/seed';
 import { buildManifest } from '../core/manifest';
 import { formatDaysLeft, daysUntil, today } from '../core/dates';
 import { centsToYuan, yuanToCents, parseExtra, serializeExtra } from '../core/values';
@@ -655,14 +654,20 @@ function registerHandlers(): void {
   );
   handle('ws:unquarantine', (id) => unquarantineWorkspace(dataDir(), asString(id, 'id')));
 
-  handle('ws:create', (name, seed) => {
-    const dd = dataDir();
-    const created = createWorkspace(dd, {
+  /*
+   * 新建工作区**永远是空的**。
+   *
+   * 这里原来收一个 `seed` 参数，界面上对应一个默认勾选的「写入演示数据」。
+   * 去掉了：新建工作区是用户要装自己东西的时刻，默认塞 17 件虚构物品，
+   * 第一件事就变成"先删掉这些不认识的东西"。想看效果走命令行的
+   * `ws seed`（那个命令还在，界面上的 `ws:seed` 通道也留着）。
+   */
+  handle('ws:create', (name) => {
+    const created = createWorkspace(dataDir(), {
       name: asString(name, 'name'),
-      source: seed === true ? 'demo' : 'blank',
+      source: 'blank',
     });
-    const seeded = seed === true ? seedWorkspace(dd, created.entry) : null;
-    return { id: created.entry.id, name: created.entry.name, dbPath: created.dbPath, seeded };
+    return { id: created.entry.id, name: created.entry.name, dbPath: created.dbPath };
   });
 
   handle('ws:update', (id, patch) => {
@@ -717,12 +722,6 @@ function registerHandlers(): void {
     const entry = requireWorkspace(dd, asString(id, 'id'));
     const result = removeWorkspace(dd, entry.id, { snapshot: true });
     return { id: entry.id, name: entry.name, snapshotPath: result.snapshotPath ?? null };
-  });
-
-  handle('ws:seed', (id) => {
-    const dd = dataDir();
-    const entry = requireWorkspace(dd, asString(id, 'id'));
-    return seedWorkspace(dd, entry);
   });
 
   handle('ws:stats', (id) => {

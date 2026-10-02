@@ -957,21 +957,27 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
 
 function cmdWsCreate(args: ParsedArgs, dataDir: string): number {
   const name = requireStr(args, 'name', '--name <名称>');
-  const withSeed = bool(args, 'seed');
 
   if (bool(args, 'dryRun')) {
-    if (out.json) emitJson({ dryRun: true, would: { action: 'createWorkspace', name, seed: withSeed } });
-    else write(`将创建工作区「${name}」${withSeed ? '（含演示数据）' : '（空）'}`);
+    if (out.json) emitJson({ dryRun: true, would: { action: 'createWorkspace', name } });
+    else write(`将创建工作区「${name}」（空）`);
     return EXIT.OK;
   }
 
+  /*
+   * 新建的工作区**永远是空的**。
+   *
+   * 原来有个 `--seed`（写入演示数据）。去掉了：「新建工作区」和
+   * 「往这个工作区里灌演示数据」是两件事，合成一个命令会让人
+   * 手滑就把演示数据建进真工作区。要演示数据用 `ws seed` ——
+   * 它要求工作区是空的，语义清楚，也不会误伤已有数据。
+   */
   const created = createWorkspace(dataDir, {
     name,
-    source: withSeed ? 'demo' : 'blank',
+    source: 'blank',
     // 显式 --use 才切默认；否则不动，避免「新建一个空工作区把默认抢走」
     makeActive: bool(args, 'use'),
   });
-  const seeded = withSeed ? seedWorkspace(dataDir, created.entry) : null;
   const stats = workspaceStats(dataDir, created.entry);
 
   if (out.json) {
@@ -980,7 +986,6 @@ function cmdWsCreate(args: ParsedArgs, dataDir: string): number {
       name: created.entry.name,
       dir: created.dir,
       dbPath: created.dbPath,
-      seed: seeded,
       tableCounts: stats.tableCounts,
     });
     return EXIT.OK;
@@ -992,7 +997,6 @@ function cmdWsCreate(args: ParsedArgs, dataDir: string): number {
     ['数据库', created.dbPath],
     ['物品数', String(stats.tableCounts['items'])],
   ]);
-  if (seeded) write(`已写入演示数据：${seeded.items} 条物品记录 / ${seeded.moves} 条流水`);
   return EXIT.OK;
 }
 
@@ -1337,11 +1341,10 @@ function cmdWsSeed(args: ParsedArgs, dataDir: string): number {
 
 function cmdInit(args: ParsedArgs, dataDir: string): number {
   const name = str(args, 'name') ?? '我的家';
-  const withSeed = !bool(args, 'noSeed');
 
   if (bool(args, 'dryRun')) {
-    if (out.json) emitJson({ dryRun: true, dataDir, name, seed: withSeed });
-    else write(`将初始化 ${dataDir}，并创建「${name}」${withSeed ? '（含演示数据）' : '（空）'}`);
+    if (out.json) emitJson({ dryRun: true, dataDir, name });
+    else write(`将初始化 ${dataDir}，并创建「${name}」（空）`);
     return EXIT.OK;
   }
 
@@ -1358,12 +1361,19 @@ function cmdInit(args: ParsedArgs, dataDir: string): number {
     return EXIT.OK;
   }
 
+  /*
+   * 初始化的第一个工作区**是空的**。
+   *
+   * 原来默认塞演示数据（`--no-seed` 才空）。去掉了 ——
+   * `init` 是用户第一次用这个程序，一打开就看到 17 件不认识的虚构物品，
+   * 还得一件件删掉才能开始记自己的东西。想要演示数据随时可以
+   * `ws seed`（它要求工作区是空的，正好接在 init 后面）。
+   */
   // init 是「第一次建立数据目录」，这时没有默认工作区，它会自动被认领
-  const created = createWorkspace(dataDir, { name, source: withSeed ? 'demo' : 'blank' });
-  const seeded = withSeed ? seedWorkspace(dataDir, created.entry) : null;
+  const created = createWorkspace(dataDir, { name, source: 'blank' });
 
   if (out.json) {
-    emitJson({ dataDir, workspaceId: created.entry.id, name, seed: seeded });
+    emitJson({ dataDir, workspaceId: created.entry.id, name });
     return EXIT.OK;
   }
   write('初始化完成。');
@@ -1372,7 +1382,6 @@ function cmdInit(args: ParsedArgs, dataDir: string): number {
     ['工作区', `${name}  (${created.entry.id})`],
     ['数据库', created.dbPath],
   ]);
-  if (seeded) write(`演示数据：${seeded.items} 条物品记录 / ${seeded.moves} 条流水`);
   return EXIT.OK;
 }
 
@@ -3354,11 +3363,10 @@ const COMMANDS: Command[] = [
   },
   {
     path: ['init'],
-    summary: '初始化数据目录与第一个工作区',
-    usage: 'init [--name <名称>] [--no-seed]',
+    summary: '初始化数据目录与第一个工作区（工作区是空的）',
+    usage: 'init [--name <名称>]',
     options: [
       { name: 'name', short: 'n', type: 'string', desc: '工作区名称', valueName: '名称' },
-      { name: 'noSeed', type: 'boolean', desc: '不写入演示数据' },
       DRY_RUN,
     ],
     run: cmdInit,
@@ -3368,11 +3376,10 @@ const COMMANDS: Command[] = [
   { path: ['ws', 'list'], summary: '列出所有工作区', usage: 'ws list', options: [], run: cmdWsList },
   {
     path: ['ws', 'create'],
-    summary: '新建一个工作区',
-    usage: 'ws create --name <名称> [--seed]',
+    summary: '新建一个工作区（空的）',
+    usage: 'ws create --name <名称>',
     options: [
       { name: 'name', short: 'n', type: 'string', desc: '工作区名称', valueName: '名称' },
-      { name: 'seed', type: 'boolean', desc: '写入演示数据' },
       { name: 'use', type: 'boolean', desc: '顺便把它设为默认工作区（默认不抢默认）' },
       DRY_RUN,
     ],

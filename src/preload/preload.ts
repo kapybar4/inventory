@@ -37,12 +37,11 @@ const api = {
   },
   ws: {
     list: () => call('ws:list'),
-    create: (name: string, seed: boolean) => call('ws:create', name, seed),
+    create: (name: string) => call('ws:create', name),
     use: (id: string) => call('ws:use', id),
     rename: (id: string, name: string) => call('ws:rename', id, name),
     update: (id: string, patch: { name?: string; notes?: string }) => call('ws:update', id, patch),
     remove: (id: string) => call('ws:remove', id),
-    seed: (id: string) => call('ws:seed', id),
     stats: (id?: string) => call('ws:stats', id ?? null),
     verify: (id?: string) => call('ws:verify', id ?? null),
   },

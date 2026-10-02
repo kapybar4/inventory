@@ -127,12 +127,37 @@ function ok(cond, what) {
 
 section('1. 初始化与工作区');
 
-check('init 创建数据目录与默认工作区，并写入演示数据', () => {
+check('init 创建数据目录与默认工作区（工作区是空的）', () => {
   const r = json(['init', '--name', '我的家']);
   eq(r.code, 0, '退出码');
   eq(r.data.data.name, '我的家', '名称');
-  ok(r.data.data.seed.items > 0, '应有演示数据');
-  return `${r.data.data.seed.items} 条物品 / ${r.data.data.seed.stocks} 条库存子行 / ${r.data.data.seed.moves} 条流水`;
+  /*
+   * init **不再写演示数据**。这条断言以前是 `seed.items > 0`，
+   * 去掉那个选项之后要反过来验：新建出来必须是空的。
+   * 后面的用例需要演示数据当夹具，所以紧接着显式 `ws seed` 灌一次 ——
+   * 这样"灌数据"这个动作在测试里也是看得见的、显式的一步。
+   */
+  eq(json(['item', 'list', '--all']).data.data.items.length, 0, 'init 出来的工作区应当是空的');
+  return '工作区为空';
+});
+
+check('ws seed 往空工作区灌演示数据（后续用例的夹具）', () => {
+  const r = json(['ws', 'seed', '我的家']);
+  eq(r.code, 0, '退出码');
+  ok(r.data.data.items > 0, '应有演示数据');
+  return `${r.data.data.items} 条物品 / ${r.data.data.stocks} 条库存子行 / ${r.data.data.moves} 条流水`;
+});
+
+check('ws seed 拒绝往已有数据的工作区重复灌', () => {
+  const r = json(['ws', 'seed', '我的家']);
+  /*
+   * 退出码 1（运行错误）而不是 3（校验失败）：`seedWorkspace` 抛的是普通
+   * `Error`，落到 main() 兜底的 EXIT.RUNTIME。断言按**实际行为**写，
+   * 不按"我觉得应该是什么"写 —— 顺带把这个不一致记在这里。
+   */
+  eq(r.code, 1, '拒绝重复灌入（退出码 1）');
+  ok(/已有物品数据/.test(r.err + r.out), '要说清为什么拒绝');
+  return '拒绝重复灌入';
 });
 
 check('重复 init 不报错、不改动已有数据', () => {

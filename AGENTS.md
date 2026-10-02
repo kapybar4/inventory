@@ -520,7 +520,7 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
 npm.cmd test            # 109 项单元测试
-npm.cmd run test:func   # 147 项 CLI/数据层功能测试
+npm.cmd run test:func   # 149 项 CLI/数据层功能测试
 npm.cmd run test:gui    # 34 步桌面端走查（要开 Electron）
 npm.cmd run test:all    # 单元 + 功能
 ```
@@ -598,8 +598,24 @@ npm.cmd run test:all    # 单元 + 功能
   现在只删 `builder-debug.yml` / `builder-effective-config.yaml`
   和 `release/` 根下的散落文件，目录一律点名。
 - **绿色版里不放测试数据。** 打包流程**不调 `init`**，所以打出来的是空数据目录，
-  用户第一次打开看到"还没有工作区"，而不是一堆示例物品
-  （`init` 默认塞演示数据，那是给开发和试用用的）。
+  用户第一次打开看到"还没有工作区"，而不是一堆示例物品。
+- **新建工作区永远是空的：`init` / `ws create` / 界面的「新建工作区」都不写演示数据。**
+  这里删掉过两处"写演示数据"的选项（`init --no-seed` 的反面、
+  `ws create --seed`、界面上那个默认勾选的复选框）。理由：
+  **新建工作区是用户要装自己东西的时刻** —— 默认塞 17 件虚构物品进去，
+  第一件事就变成"先删掉这些不认识的东西"，而删的过程还要一件件确认，
+  比空着难受得多。
+  要演示数据用 `ws seed`：它是一条**独立命令**、要求工作区是空的、
+  只从命令行走（界面上没有入口），语义清楚也不会误伤已有数据。
+  `core/seed.ts` 与 `SEED_ITEM_COUNT` 都还在，单元测试靠它当夹具。
+  ⚠️ 别把"新建"和"灌演示数据"再合成一个命令：手滑就会把演示数据
+  建进真工作区。`source` 字段仍保留 `demo` 取值（导入的来源标签要用）。
+- **功能测试的夹具现在是"显式两步"：`init` → `ws seed`。**
+  以前 `init` 默认就把演示数据灌好了，所有用例都白拿这个夹具；
+  去掉默认之后必须在测试里显式 `ws seed` 一次（第 1 节里那两条 check）。
+  顺带多了一条"`ws seed` 拒绝往已有数据的工作区重复灌"——
+  它的退出码是 **1（运行错误）不是 3**：`seedWorkspace` 抛的是普通 `Error`，
+  落到 main() 兜底的 `EXIT.RUNTIME`。断言按实际行为写，别按"觉得应该是什么"写。
 - **`readdirSync` 不带 `withFileTypes` 时返回字符串数组**，
   对元素取 `.name` 是 `undefined`，`join` 会抛
   `ERR_INVALID_ARG_TYPE: The "path" argument must be of type string` ——
@@ -681,7 +697,7 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、单元 109 项、CLI 147 项、往返不变式、
+**已验证**：核心功能、单元 109 项、CLI 149 项、往返不变式、
 **绿色版打包（`npm.cmd run release`）**。
 桌面端走查的 34 步现在跑不完（见下），改界面时改用聚焦探针确认。
 
