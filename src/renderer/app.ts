@@ -1258,9 +1258,10 @@ function setTab(tab: typeof state.tab): void {
 function render(): void {
   const view = $('#view');
   view.innerHTML = '';
-  // 只有工作区页需要固定底栏；切走时清掉，避免影响别的页面的滚动
+  // 每个页面自己的标记都要清掉，否则从概览切到物品页会带上概览的样式
   view.classList.remove('has-footer');
   view.classList.remove('no-pad');
+  view.classList.remove('dashboard');
 
   /*
    * 数据目录不可用时**整页置灰**，只留顶部那条和数据位置。
@@ -1336,6 +1337,16 @@ function card(title: string, value: string, sub?: string, cls = ''): HTMLElement
 }
 
 function renderDashboard(view: HTMLElement): void {
+  /*
+   * 打上标记，让样式能只针对概览页。
+   *
+   * 这一页的内容高度是**常数**（8 项最先到期 + 2 项待补货），
+   * 所以不需要 `.table-wrap` 那条 `max-height: 62vh` 的内部滚动 ——
+   * 那个上限还会随视口高度变，让整页高度变成移动目标，
+   * 窗口该开多大就永远算不准（默认高度 860/900 都差十几像素，待补货被切在视口外）。
+   */
+  view.classList.add('dashboard');
+
   const a = state.alert;
   const grid = el('div', { class: 'grid' });
 
@@ -1385,16 +1396,44 @@ function renderDashboard(view: HTMLElement): void {
   const allDated = flat
     .filter((it) => !it.isLongTerm)
     .sort((x, y) => String(x.expiresOn).localeCompare(String(y.expiresOn)));
-  if (allDated.length > 0) {
+
+  /*
+   * 概览页的两块固定容量：**8 项最先到期 + 2 项待补货**。
+   *
+   * 数量固定是为了让这一页的高度稳定 —— 概览是每次打开都会看到的第一屏，
+   * 一会儿三行一会儿二十行的话，下面的东西会跟着上下跳，
+   * 而且默认窗口高度也没法保证装得下（见 main.ts 的窗口尺寸）。
+   *
+   * **不满足就有多少显示多少**，不补空行、不显示占位；一项都没有就整块不出现。
+   * 空表格比"没有内容"更让人以为出了故障。
+   */
+  const SOONEST_SLOTS = 8;
+  const RESTOCK_SLOTS = 2;
+
+  const soonest = allDated.slice(0, SOONEST_SLOTS);
+  if (soonest.length > 0) {
     view.append(
-      sectionTitle('最先到期的', allDated.length > 8 ? `共 ${allDated.length} 项，显示前 8 项` : `共 ${allDated.length} 项`),
+      sectionTitle(
+        '最先到期',
+        allDated.length > soonest.length
+          ? `共 ${allDated.length} 项，显示前 ${soonest.length} 项`
+          : `共 ${allDated.length} 项`,
+      ),
     );
-    view.append(tableWrap(itemsTable(allDated.slice(0, 8), { quickDelete: true })));
+    view.append(tableWrap(itemsTable(soonest, { quickDelete: true })));
   }
 
-  if (a && a.lowStock.length > 0) {
-    view.append(sectionTitle('待补货', `${a.lowStock.length} 项`));
-    view.append(tableWrap(restockTable(a.lowStock)));
+  const restock = (a?.lowStock ?? []).slice(0, RESTOCK_SLOTS);
+  if (restock.length > 0) {
+    view.append(
+      sectionTitle(
+        '待补货',
+        a && a.lowStock.length > restock.length
+          ? `共 ${a.lowStock.length} 项，显示前 ${restock.length} 项`
+          : `${restock.length} 项`,
+      ),
+    );
+    view.append(tableWrap(restockTable(restock)));
   }
 }
 

@@ -6,7 +6,7 @@
  *   - core 里禁止 import electron —— 一旦破例，CLI 就无法在纯 Node 下运行了。
  *   - 渲染进程拿不到 Node，只能通过 preload 暴露的白名单通道访问数据。
  */
-import { app, BrowserWindow, dialog, ipcMain, shell, Menu, nativeTheme } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, screen, shell, Menu, nativeTheme } from 'electron';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
@@ -141,9 +141,30 @@ function dataDir(): string {
 let mainWindow: BrowserWindow | null = null;
 
 function createWindow(): void {
+  /**
+   * 默认尺寸：**保证概览页整页不用滚动**。
+   *
+   * 概览页被 `renderDashboard` 固定成「8 项最先到期 + 2 项待补货」，
+   * 而且那一页的 `.table-wrap` 不设高度上限（见 styles.css 的 `#view.dashboard`），
+   * 所以整页高度是个**常数**。逐段量出来是 836：
+   *     卡片 102 + 分布条 19 + 两个标题 56×2 + 最先到期表 465
+   *   + 待补货表 74 + 上下内边距 50 + 各段间距 ≈ 836
+   *
+   * 窗口的标题栏与边框还要吃掉约 37px，所以窗口高度至少要 873 才能
+   * 让这 836 全都落在视口里。原来写的 860 差十几像素 ——
+   * 表现就是待补货那两项被切在视口外，得滚动才看得见。
+   * 900 也还不够（视口只有 765），所以取 980。
+   *
+   * **上限按屏幕可用区域收**：小屏上硬撑出一个比屏幕还高的窗口，
+   * 底部会跑到任务栏下面，反而更看不全。
+   */
+  const workArea = screen.getPrimaryDisplay().workAreaSize;
+  const width = Math.min(1280, Math.max(940, workArea.width - 80));
+  const height = Math.min(980, Math.max(620, workArea.height - 60));
+
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width,
+    height,
     minWidth: 940,
     minHeight: 620,
     /*
