@@ -84,7 +84,15 @@ export function buildTimelineSlots(now: Date = new Date()): TimelineSlot[] {
     let label = '';
     let labelKind: TimelineSlot['labelKind'];
     if (isToday) {
-      label = `今天 ${s.slice(5)}`;
+      /*
+       * 今天那格**不加「今天」两个字**，只写日期，靠颜色区分。
+       *
+       * 标注比格子宽（格子 34px），加了前缀就是「今天 10-02」约 62px，
+       * 会和相邻那格的「10-01」撞在一起 —— 月初和今天常常就隔一天
+       * （10-01、10-02），撞的概率很高。日期本身已经说明了是哪天，
+       * 重点是"这是今天"，用颜色（.tl-slot-today）表达更省地方也更醒目。
+       */
+      label = s.slice(5);
       labelKind = 'today';
     } else if (isWeekStart) {
       label = s.slice(5);

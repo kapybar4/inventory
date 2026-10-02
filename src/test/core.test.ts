@@ -2602,7 +2602,13 @@ test('时间轴：只有一格标成今天，且标的就是今天', () => {
   assert.equal(todays.length, 1, '有且只有一格是今天');
   assert.equal(todays[0]!.start, '2026-10-02');
   assert.equal(todays[0]!.labelKind, 'today');
-  assert.match(todays[0]!.label, /今天/, '今天那格要写明');
+  /*
+   * 今天那格只写日期，不加「今天」两个字 —— 靠颜色区分。
+   * 加了前缀就是 62px 宽，而格子只有 34px，会和相邻那格的日期撞在一起
+   * （月初和今天常常就隔一天：10-01、10-02）。
+   * 所以这里断言的是"有这格、它被标成 today"，而不是文案里有「今天」。
+   */
+  assert.equal(todays[0]!.label, '10-02', '今天那格写日期');
 });
 
 /**

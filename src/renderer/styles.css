@@ -19,6 +19,19 @@
    * 与主进程 main.ts 的 THEME_BG / THEME_FG 必须一致（首帧底色与标题栏配色）。
    */
   --bg: #000000;
+  /*
+   * `--bg-0` 与 `--bg` 同色，但**必须单独声明**。
+   *
+   * 这个变量被时间轴的表头、行标签列、分组标题用着（都是
+   * `position: sticky` 的浮层，需要一层不透明底色把底下滚过去的内容挡住），
+   * 可是它从最初那次提交起就**只被引用、从未定义**。
+   * CSS 里 `var()` 找不到变量且没有 fallback 时整个声明失效 ——
+   * 于是这几处背景全是透明的：横向滚动时物品名从表头底下透出来，
+   * 看起来就是上面一行和下面一行叠在一起。
+   *
+   * 这类 bug 特别难查：样式看起来"写了"，devtools 里却什么都不报。
+   */
+  --bg-0: #000000;
   --bg-1: #0a0a0a;
   --bg-2: #121212;
   --bg-3: #1a1a1a;
@@ -940,14 +953,27 @@ td.clickable:hover .link {
   min-width: max-content;
 }
 
+/*
+ * 时间轴的表头行。
+ *
+ * `z-index` 必须比行标签列（3）高：横向滚动时右半部分会从表头下面经过，
+ * 表头压不住的话日期和物品名就会互相叠字。
+ * 背景必须**不透明**（`--bg-0` 就是纯黑，不是半透明的那个），
+ * 而且子格也要各自给背景 —— 标注文字是允许溢出格子的，
+ * 只给容器上色的话，溢出的那截仍会露出下面的内容。
+ */
 .tl-head {
   display: flex;
   align-items: stretch;
   position: sticky;
   top: 0;
-  z-index: 4;
+  z-index: 6;
   background: var(--bg-0);
   border-bottom: 1px solid var(--line-strong);
+}
+
+.tl-head .tl-slot-head {
+  background: var(--bg-0);
 }
 
 .tl-corner {
@@ -979,6 +1005,13 @@ td.clickable:hover .link {
   border-right: 1px solid var(--line-soft);
   padding: 7px 12px;
   font-size: 12.5px;
+  /*
+   * 必须裁切。
+   *
+   * 这一列是 `position: sticky; left: 0`：横向滚动时它固定在左边不动，
+   * 而它**右边**的内容会从底下经过。不裁的话长物品名会整段铺到轨道上，
+   * 和日期、别的行的名字叠在一起。省略号比叠字好读得多。
+   */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1096,13 +1129,26 @@ td.clickable:hover .link {
   font-size: 12px;
 }
 
+/*
+ * 到期日不在 4 周窗口内的条目标记。
+ *
+ * 只是一个靠左的小箭头 —— 原来这里放的是「2026-08-18（超出范围）」，
+ * 而 28 天窗口下几乎所有条目都在窗口外，于是每一行都拖出一串文字，
+ * 溢出到相邻行还被表头压住，看起来就是乱码。
+ * `nowrap` + `max-width` 保证它再也不会变成一条长尾巴。
+ */
 .tl-outside {
   position: absolute;
-  right: 4px;
-  top: 3px;
-  font-size: 10.5px;
+  left: 2px;
+  top: 50%;
+  transform: translateY(-50%);
+  max-width: 22px;
+  overflow: hidden;
+  font-size: 11px;
   color: var(--fg-faint);
   white-space: nowrap;
+  pointer-events: auto;
+  cursor: default;
 }
 
 /* ───────────── 分组页与「一组库存」 ───────────── */
@@ -1598,6 +1644,20 @@ p.muted,
   color: var(--fg-dim);
 }
 
+/*
+ * 每一项不折行，数字与标签之间有**实实在在的间距**。
+ *
+ * 原来靠字符串里的一个空格分隔，但 `.dist-legend` 是 flex 容器：
+ * 空格所在的文本节点被拆成独立的匿名 flex item，前后的空白被折叠，
+ * 于是渲染成「615 天内」这种挤在一起的样子。
+ * 这里改成元素 + 外边距，不再依赖会被折叠的空白。
+ */
+.dist-legend > span {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+
 .dist-legend i {
   display: inline-block;
   width: 8px;
@@ -1609,6 +1669,8 @@ p.muted,
 .dist-legend b {
   color: var(--fg);
   font-variant-numeric: tabular-nums;
+  /* 数字与标签的间距做实，别依赖字符串里的空格 */
+  margin-right: 5px;
 }
 
 /* ───────────────────────── 表格 ───────────────────────── */
@@ -2078,6 +2140,82 @@ th.col-act {
   width: 34px;
   text-align: right;
   white-space: nowrap;
+}
+
+/*
+ * 底栏里的文字操作（「更改数据目录」「在资源管理器中打开」）。
+ *
+ * 刻意**不做成按钮**：这一行是拿来放"数据在哪"的，两个描边按钮会让
+ * 视觉重量和路径一样重，整条底栏又满又碎。平时就是一行小字，
+ * 悬停才浮出底色 —— 需要的时候找得到，不需要的时候不抢戏。
+ */
+.df-link {
+  background: transparent;
+  border: none;
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.df-link:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.df-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/*
+ * 工作区列表里的「存在待办」标记。
+ *
+ * 替代了原来的「清理已用完 (N)」按钮：那个只是把用完的东西扫掉，属于收拾；
+ * 而列表真正该回答的是"哪个工作区有东西要处理"。
+ * 做成一个小徽标而不是按钮 —— 它是**信息**（这里有事），
+ * 不是动作（点我做事）。想知道是什么事就切过去看。
+ */
+.pending-chip {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  background: var(--warn-dim);
+  color: #f5d08a;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* 顶栏那个返回箭头，跟着工作区下拉框走 */
+.wsp-back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.wsp-back:hover {
+  background: var(--bg-hover);
+  border-color: var(--line);
+  color: var(--fg);
+}
+
+.wsp-back:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /*

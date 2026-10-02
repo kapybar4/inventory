@@ -73,6 +73,8 @@ interface WsRow {
   moves: number | null;
   /** 可一键清理的条数：非批量且剩余为 0 */
   purgeable: number;
+  /** 待办条数 = 已过期 + 15 天内到期。长期不计入；null = 读不出来 */
+  pending: number | null;
   dbBytes: number | null;
   integrityOk: boolean | null;
 }
@@ -504,7 +506,6 @@ const state: {
   sortField: string;
   sortFields: SortFieldDef[];
   /** 展开到第几级（1~3，一级不可关） */
-  groupLevels: number;
   /** 收起的分组路径 */
   collapsed: Set<string>;
   groupOnlyExpired: boolean;
@@ -517,7 +518,6 @@ const state: {
    * 是个**筛选开关**而不是另一个页面 —— 打开就筛，关掉就回来，
    * 当前的分组层级、排序、列设置都不受影响。
    */
-  briefView: boolean;
   /**
    * 展开了「补充信息」的行。
    *
@@ -559,12 +559,10 @@ const state: {
   groupTree: null,
   sortField: 'manual',
   sortFields: [],
-  groupLevels: 1,
   collapsed: new Set<string>(),
   groupOnlyExpired: false,
   categoryFilter: '',
   expanded: new Set<string>(),
-  briefView: false,
   extraOpen: new Set<string>(),
   batchMode: false,
   batchSelected: new Set<string>(),
@@ -713,46 +711,6 @@ function hasExpired(it: ItemRow): boolean {
   return expireOnly(it).some((e) => e.expired);
 }
 
-/** 在不在「N 天内到期」（不含过保、不含已过期） */
-function isSoonItem(it: ItemRow): boolean {
-  return expireOnly(it).some((e) => !e.expired && e.daysLeft <= Number(SOON_TEXT));
-}
-
-/**
- * 「简明视图」开关。
- *
- * 打开后只剩两种东西：**已过期**的和 **N 天内到期**的。
- * 过滤是纯本地的（数据早就在 `state.items` 里），所以切换是瞬时的、
- * 不产生任何请求，也不会动当前的分组层级与排序。
- *
- * 按钮上直接显示会剩几条 —— 免得点开发现是空的还得再点回来。
- */
-function briefViewToggle(): HTMLElement {
-  const count = filterBrief(state.items).length;
-  const btn = el('button', {
-    class: `ghost brief-toggle${state.briefView ? ' on' : ''}`,
-    type: 'button',
-    text: state.briefView ? '✕ 退出简明视图' : `简明视图（${count}）`,
-  });
-  btn.title = state.briefView
-    ? '回到完整列表'
-    : `只显示已过期和 ${SOON_TEXT} 天内到期的物品（当前 ${count} 条）`;
-  btn.addEventListener('click', () => {
-    state.briefView = !state.briefView;
-    render();
-  });
-  return btn;
-}
-
-/**
- * 简明视图：只留「已过期」与「N 天内到期」。
- *
- * 注意分母是 `expireOnly` —— 只过保的东西不该出现在简明视图里，
- * 否则"简明"就失去意义了。
- */
-function filterBrief(items: ItemRow[]): ItemRow[] {
-  return items.filter((it) => hasExpired(it) || isSoonItem(it));
-}
 
 /**
  * 时间分布条：过期 / 15 天内 / 之后 / 长期。
@@ -789,7 +747,15 @@ function severityDist(counts: AlertSummary['counts']): HTMLElement | null {
     const item = el('span');
     const swatch = el('i');
     swatch.style.background = s.color;
-    item.append(swatch, el('b', { text: String(s.value) }), document.createTextNode(` ${s.label}`));
+    /*
+     * 数字和标签之间要**有东西**顶着。
+     *
+     * 原来靠一个普通空格，而 `.dist-legend` 是 flex 容器、`item` 是 flex item ——
+     * 里面的空白文本节点会被丢掉，于是渲染成「615 天内」。
+     * 用 nowrap 保证不折行，再用 CSS 给 b 加右边距把间距做实，
+     * 不再依赖会被折叠掉的空白。
+     */
+    item.append(swatch, el('b', { text: String(s.value) }), el('span', { text: s.label }));
     legend.append(item);
   }
   box.append(legend);
@@ -912,6 +878,23 @@ function renderWsPicker(): void {
   const list = state.wsList?.workspaces ?? [];
   const current = list.find((w) => w.id === state.wsId) ?? null;
 
+  /*
+   * 返回箭头：回到「工作区」页。
+   *
+   * 这一页不再是常驻页签（"换个地方"是低频动作，占一个页签不值得），
+   * 所以需要一个入口。放在下拉框左边而不是顶上，是因为它和下拉框做的是同一件事
+   * （都是"去另一个工作区"），摆在一起语义连贯 —— 左边进去挑，右边直接切。
+   */
+  const back = el('button', { class: 'wsp-back', type: 'button' });
+  back.title = '管理工作区（新建、导入、导出、删除）';
+  back.setAttribute('aria-label', '管理工作区');
+  back.innerHTML =
+    '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">' +
+    '<path d="M10 3.5 5.5 8l4.5 4.5" fill="none" stroke="currentColor" ' +
+    'stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  back.addEventListener('click', () => setTab('workspaces'));
+  host.append(back);
+
   const trigger = el('button', { class: 'wsp-trigger', type: 'button' });
   trigger.append(el('span', { class: 'wsp-dot' }));
   trigger.append(el('span', { class: 'wsp-name', text: current?.name ?? '（还没有工作区）' }));
@@ -1015,11 +998,17 @@ async function loadGroupTree(): Promise<void> {
     state.groupTree = null;
     return;
   }
+  /*
+   * 分组固定一级（只按分类）。
+   *
+   * 请求里不再传 levels —— 传了也只是被 core 收下、再原样写回偏好，
+   * 而界面上已经没有地方能改它了。留着一个"能改但没人改"的参数，
+   * 下次有人接手时会以为它是活的。
+   */
   state.groupTree = await window.api.group.list(state.wsId, {
-    levels: state.groupLevels,
+    levels: 1,
     sort: state.sortField,
   });
-  state.groupLevels = state.groupTree.requestedLevels;
   state.sortField = state.groupTree.sortedBy;
   state.collapsed = new Set(state.groupTree.collapsed);
   // 分组接口顺带把列配置带回来了，省一次往返
@@ -1226,7 +1215,13 @@ function renderBanner(): void {
   if (expired > 0) add(`${expired} 项已过期`, 'danger', () => setTab('groups'));
   if (soon > 0) add(`${soon} 项 ${SOON_TEXT} 天内到期`, 'info', () => setTab('timeline'));
   if (lowStock > 0) add(`${lowStock} 项待补货`, 'info', () => setTab('items'));
-  if (a.counts.longTerm > 0) add(`${a.counts.longTerm} 项长期`, 'ghost', () => setTab('groups'));
+  /*
+   * 长期物品**不在这里出现**。
+   *
+   * 这条横幅讲的是"需要留意"，而长期物品的定义就是"没有到期日、不用盯" ——
+   * 把它们和需要处理的东西并列是自相矛盾的，还会把真正要看的数字稀释掉。
+   * 「长期」自己那张卡片已经报了数量，不必在横幅里再说一遍。
+   */
 }
 
 /** 把数量显示在导航上，不用切页就知道有多少事 */
@@ -1252,8 +1247,10 @@ function updateTabCounts(): void {
 
 function setTab(tab: typeof state.tab): void {
   state.tab = tab;
+  /** 工作区页没有对应的页签了（入口是返回箭头），高亮规则单独处理 */
+  const highlight = tab === 'workspaces' || tab === 'schema' ? null : tab;
   document.querySelectorAll('.tab:not(.hidden)').forEach((b) => {
-    b.classList.toggle('active', (b as HTMLElement).dataset['tab'] === tab);
+    b.classList.toggle('active', highlight !== null && (b as HTMLElement).dataset['tab'] === highlight);
   });
   render();
 }
@@ -1593,28 +1590,19 @@ function renderGroups(view: HTMLElement): void {
   // ── 工具栏 ──
   const bar = el('div', { class: 'toolbar' });
 
-  // 分组层级：一级不可关
-  const lvWrap = el('div', { class: 'seg' });
-  for (const n of [1, 2, 3] as const) {
-    const btn = el('button', {
-      class: `seg-btn${state.groupLevels === n ? ' active' : ''}`,
-      text: `${n} 级`,
-      type: 'button',
-    });
-    btn.title =
-      n === 1
-        ? '一级分组（分类）默认开启，不可关闭'
-        : n === 2
-          ? '二级：再按子类拆开'
-          : '三级：再按标签拆开（一个物品可以有多个标签，会出现在多组里）';
-    btn.addEventListener('click', () => {
-      state.groupLevels = n;
-      void savePrefs({ levels: n });
-      void loadGroupTree().then(render);
-    });
-    lvWrap.append(btn);
-  }
-  bar.append(el('span', { class: 'tl-label', text: '分组' }), lvWrap);
+  /*
+   * 分组层级选择器（1 级 / 2 级 / 3 级）已去掉，**只按分类分一级**。
+   *
+   * 二级（子类）和三级（标签）看起来是"更细的视角"，实际用起来
+   * 只是把同一批东西拆成更多更小的组，每组两三行 —— 翻起来比一级更累，
+   * 而且分组一多，"哪一组该先处理"反而看不出来了。
+   * 标签尤其糟：一个物品有多个标签就会出现在多个组里，
+   * 同一个东西重复出现让人怀疑是不是记了两遍。
+   *
+   * 分类、子类、标签这三个字段**都还在**（导出、搜索、展开区照样用），
+   * 只是不再拿来切分组的层级。
+   */
+  bar.append(el('span', { class: 'tl-label', text: '按分类分组' }));
 
   // 排序开关 + 字段
   const sortBox = el('label', { class: 'check mini sort-switch' });
@@ -1670,7 +1658,6 @@ function renderGroups(view: HTMLElement): void {
   onlyExpired.append(oeBox, el('span', { text: '只看已过期' }));
   bar.append(onlyExpired);
 
-  bar.append(briefViewToggle());
 
   const collapseAll = el('button', { class: 'ghost small', text: '全部收起' });
   collapseAll.addEventListener('click', () => {
@@ -1734,8 +1721,7 @@ function renderGroups(view: HTMLElement): void {
   function buildGroupNode(node: GroupNode, depth: number): HTMLElement | null {
     let items = node.items;
     // 两个筛选互不冲突：简明视图看「该处理的」，只看过期看「已经坏了的」
-    if (state.briefView) items = filterBrief(items);
-    if (state.groupOnlyExpired) items = items.filter((it) => hasExpired(it));
+      if (state.groupOnlyExpired) items = items.filter((it) => hasExpired(it));
     const kids = node.children.map((c) => buildGroupNode(c, depth + 1)).filter((x): x is HTMLElement => x !== null);
     if (items.length === 0 && kids.length === 0) return null;
 
@@ -2221,9 +2207,21 @@ function renderTimeline(view: HTMLElement): void {
         }
         track.append(cell);
       });
-      // 落在范围外的：贴边显示，免得用户以为它消失了
+      /*
+       * 到期日落在 4 周窗口之外的条目，只留一个贴边的箭头标记。
+       *
+       * 原来这里写的是「2026-08-18（超出范围）」这一整串文字，贴在轨道最左边。
+       * 28 天窗口下**绝大多数条目都在范围外**，于是每一行都拖出一串长文本，
+       * 溢出到相邻行、还被表头压住 —— 看起来就是一片乱码。
+       * 而且那串字本身就自相矛盾：能看到「超出范围」四个字，
+       * 就说明它已经被显示出来了。
+       *
+       * 现在只放一个方向箭头：具体日期在行标题的悬停提示里，点开物品也能看到。
+       */
       if (e.slot < 0) {
-        track.append(el('div', { class: 'tl-outside', text: `${e.expiresOn}（超出范围）` }));
+        const outside = el('div', { class: 'tl-outside', text: '‹' });
+        outside.title = `${e.expiresOn}（不在本时间轴范围内）`;
+        track.append(outside);
       }
       row.append(track);
       sec.append(row);
@@ -2816,8 +2814,6 @@ function renderItems(view: HTMLElement): void {
   colBtn.addEventListener('click', () => openColumnSettings());
   bar.append(colBtn);
 
-  bar.append(briefViewToggle());
-
   /*
    * 批量删除。
    *
@@ -2863,7 +2859,7 @@ function renderItems(view: HTMLElement): void {
     const all = el('button', { class: 'ghost small', text: '全选' });
     all.title = '勾选当前列表里的全部物品（受搜索与分类筛选影响）';
     all.addEventListener('click', () => {
-      for (const it of state.briefView ? filterBrief(state.items) : state.items) {
+      for (const it of state.items) {
         state.batchSelected.add(it.uuid);
       }
       render();
@@ -2894,7 +2890,7 @@ function renderItems(view: HTMLElement): void {
   if (state.batchMode) {
     // 表头这个复选框只管"全选/全不选"，不表示任何一条的状态
     const allBox = el('input', { type: 'checkbox', class: 'batch-box' }) as HTMLInputElement;
-    const shownForAll = state.briefView ? filterBrief(state.items) : state.items;
+    const shownForAll = state.items;
     allBox.checked = shownForAll.length > 0 && shownForAll.every((i) => state.batchSelected.has(i.uuid));
     allBox.indeterminate =
       !allBox.checked && shownForAll.some((i) => state.batchSelected.has(i.uuid));
@@ -2920,18 +2916,7 @@ function renderItems(view: HTMLElement): void {
 
   const body = el('tbody');
   // 简明视图：本地筛选，不发请求
-  const shown = state.briefView ? filterBrief(state.items) : state.items;
-  if (shown.length === 0 && state.briefView) {
-    body.append(
-      el(
-        'tr',
-        {},
-        el('td', { class: 'empty', colSpan: String(colSpan) }, el('span', {
-          text: `简明视图里没有东西 —— 没有已过期的，也没有 ${SOON_TEXT} 天内到期的。`,
-        })),
-      ),
-    );
-  }
+  const shown = state.items;
   for (const it of shown) {
     const tr = el('tr');
     if (it.lowStock) tr.classList.add('low-stock');
@@ -3041,7 +3026,7 @@ function renderWorkspaces(view: HTMLElement): void {
 
   const t = el('table');
   const hrow = el('tr');
-  for (const h of ['', '名称', '说明', '物品', '流水', '来源', '创建时间', '大小', '完整性', '']) {
+  for (const h of ['', '名称', '说明', '待办', '物品', '流水', '来源', '创建时间', '大小', '完整性', '']) {
     hrow.append(el('th', { text: h }));
   }
   t.append(el('thead', {}, hrow));
@@ -3054,7 +3039,7 @@ function renderWorkspaces(view: HTMLElement): void {
     // 当前工作区用一个明显的圆点，其余留白
     tr.append(td(w.active ? '●' : '', w.active ? 'active-dot' : ''));
 
-    // 名称整格可点：点一下即切换过去
+    // 名称整格可点：点一下即切过去，**并直接落到概览页**
     const nameCell = el('td', { class: 'clickable' });
     const nameWrap = el('div', { class: 'ws-name' });
     nameWrap.append(el('span', { class: 'link', text: w.name }));
@@ -3062,12 +3047,37 @@ function renderWorkspaces(view: HTMLElement): void {
     nameCell.append(nameWrap);
     nameCell.addEventListener('click', (ev) => {
       if ((ev.target as HTMLElement).closest('button')) return;
-      void switchWorkspace(w.id);
+      /*
+       * 点了名字就进那个工作区的概览页。
+       *
+       * 原来只切工作区、留在"工作区"这一页上 —— 于是点完只看到列表里
+       * 那个圆点挪了一格，人还得自己再点一次「概览」。切工作区的意图
+       * 本来就是"去看那个库"，落到概览页才是把这件事做完。
+       * 悬停提示也去掉了：整格可点加上悬停变色已经说明了这件事，
+       * 再挂一个原生 title 只会弹出一个方角白框。
+       */
+      void switchWorkspace(w.id, { goDashboard: true });
     });
-    nameCell.title = '点击切换到这个工作区';
     tr.append(nameCell);
 
     tr.append(td(w.notes ?? '', 'muted'));
+
+    /*
+     * 待办列。原来这里是「清理已用完 (N)」按钮 —— 那个只是把用完的东西
+     * 从列表里扫掉，属于收拾；工作区列表真正该回答的是
+     * "哪个工作区有东西要处理"。过期和临期才是要处理的事。
+     */
+    const pendingCell = el('td', { class: 'right' });
+    if (w.pending === null) {
+      pendingCell.append(el('span', { class: 'muted', text: '—' }));
+    } else if (w.pending === 0) {
+      pendingCell.append(el('span', { class: 'muted', text: '无' }));
+    } else {
+      const chip = el('span', { class: 'pending-chip', text: `存在待办 ${w.pending}` });
+      chip.title = `${w.pending} 条已过期或 15 天内到期（长期物品不计入）`;
+      pendingCell.append(chip);
+    }
+    tr.append(pendingCell);
 
     tr.append(td(w.items ?? '—', 'right'), td(w.moves ?? '—', 'right'));
 
@@ -3089,14 +3099,6 @@ function renderWorkspaces(view: HTMLElement): void {
     const editBtn = el('button', { class: 'ghost small', text: '编辑' });
     editBtn.title = '修改名称与说明';
     editBtn.addEventListener('click', () => openEditWorkspace(w));
-
-    // 有「已消耗完」的普通物品时才出现，避免常驻一个永远点不动的按钮
-    if (w.purgeable > 0) {
-      const purgeBtn = el('button', { class: 'ghost small purge', text: `清理已用完 (${w.purgeable})` });
-      purgeBtn.title = '删除这个工作区里所有「非批量且数量为 0」的记录';
-      purgeBtn.addEventListener('click', () => void confirmPurge(w));
-      ops.append(purgeBtn);
-    }
 
     const exp = el('button', { class: 'ghost small', text: '导出' });
     exp.addEventListener('click', () => void doExport(w.id));
@@ -3200,19 +3202,24 @@ function buildDataFooter(info: AppInfo | null): HTMLElement {
   }
 
   if (info) {
+    /*
+     * 底栏去掉两样东西。
+     *
+     * 一是版本号（`v0.1.0 · 数据结构 v9 · Electron 44.5.1`）—— 它挪到窗口标题栏了。
+     * 底栏这一行是拿来放"数据在哪、怎么打开"的，塞一串版本号只会把有用的挤掉。
+     *
+     * 二是两个按钮的边框：它们是这一行唯一的操作，做成描边按钮后
+     * 视觉重量和左边的路径一样重，整条底栏显得又满又碎。
+     * 改成"文字 + 悬停才出现的底色"（.df-link），安静下来之后
+     * 真正的内容（路径）反而更清楚。
+     */
     if (!info.dataDirConfigured) {
-      const move = el('button', { class: 'ghost small', text: '更改数据目录' });
+      const move = el('button', { class: 'df-link', text: '更改数据目录' });
       move.title = '当前用的是程序目录下的 data/；可以换到别处';
       move.addEventListener('click', () => openDataDirDialog());
       right.append(move);
     }
-    right.append(
-      el('span', {
-        class: 'muted small',
-        text: `v${info.version} · 数据结构 v${info.schemaVersion} · Electron ${info.electron}`,
-      }),
-    );
-    const open = el('button', { class: 'ghost small', text: '在资源管理器中打开' });
+    const open = el('button', { class: 'df-link', text: '在资源管理器中打开' });
     open.addEventListener('click', () => void window.api.io.openPath(info.dataDir).catch(fail));
     right.append(open);
   }
@@ -3986,69 +3993,6 @@ function openNewWorkspace(): void {
   });
 }
 
-/**
- * 一键清理确认框。
- *
- * 先把要删的清单拉出来给用户看，再让他确认 —— 批量删除最怕的就是
- * 「不知道删了什么」。
- */
-async function confirmPurge(w: WsRow): Promise<void> {
-  let preview: { items: { uuid: string; name: string; location: string }[] };
-  try {
-    preview = await window.api.item.purgeSpent(w.id, true);
-  } catch (err) {
-    fail(err);
-    return;
-  }
-
-  const body = el('div');
-  body.append(
-    el('p', {
-      text: `「${w.name}」里有 ${preview.items.length} 条已经消耗完的普通物品记录。清理只删这些记录，批量物品即使数量为 0 也会保留。`,
-    }),
-  );
-
-  const t = el('table');
-  const hrow = el('tr');
-  for (const h of ['名称', '位置']) hrow.append(el('th', { text: h }));
-  t.append(el('thead', {}, hrow));
-  const tb = el('tbody');
-  for (const it of preview.items) {
-    const tr = el('tr');
-    tr.append(td(it.name), td(it.location || '—', 'muted'));
-    tb.append(tr);
-  }
-  t.append(tb);
-  body.append(tableWrap(t));
-
-  const alsoMoves = el('p', {
-    class: 'muted small',
-    text: '这些记录各自的出入库流水会一并删除。这一步不可撤销。',
-  });
-  body.append(alsoMoves);
-
-  openModal({
-    title: `清理 ${preview.items.length} 条已用完的记录？`,
-    wide: true,
-    body,
-    actions: [
-      {
-        label: `清理 ${preview.items.length} 条`,
-        kind: 'danger',
-        onClick: async () => {
-          try {
-            const res = await window.api.item.purgeSpent(w.id, false);
-            toast(`已清理 ${res.purged} 条`);
-            $('#modal-root').classList.add('hidden');
-            await reloadAll();
-          } catch (err) {
-            fail(err);
-          }
-        },
-      },
-    ],
-  });
-}
 
 function confirmDeleteWs(w: WsRow): void {  openModal({
     title: `删除工作区「${w.name}」？`,
@@ -4092,7 +4036,14 @@ function confirmDeleteItem(it: ItemRow): void {
   });
 }
 
-async function switchWorkspace(id: string): Promise<void> {
+/**
+ * 切换工作区。
+ *
+ * `goDashboard` 用于「工作区」页里点了某个名字的场景：切完直接落到概览页。
+ * 不带这个标志时（顶栏下拉框切换）停在当前页 —— 在那里换工作区
+ * 常常是"换个库继续看物品页"，把人踢回概览反而打断了手头的事。
+ */
+async function switchWorkspace(id: string, opts?: { goDashboard?: boolean }): Promise<void> {
   try {
     await window.api.ws.use(id);
     state.wsId = id;
@@ -4101,6 +4052,7 @@ async function switchWorkspace(id: string): Promise<void> {
     // 用户会以为自己删的是眼前这些
     exitBatchMode();
     await reloadAll();
+    if (opts?.goDashboard) setTab('dashboard');
   } catch (err) {
     fail(err);
   }
@@ -4296,7 +4248,18 @@ async function boot(): Promise<void> {
     state.info = await window.api.app.info();
     state.schema = await window.api.app.schema();
     await loadSortFields();
-    $('#app-meta').textContent = `v${state.info.version} · 数据结构 v${state.info.schemaVersion}`;
+
+    /*
+     * 版本号进标题栏。
+     *
+     * 界面上原来在两处显示版本：左上角应用名旁边、以及底栏数据目录那条。
+     * 两处都去掉了 —— 那些位置该留给工作区和操作。标题栏是唯一还合适的落点：
+     * 它本来就写着应用名，宽度也够，用户要报版本号时第一眼就会看标题栏。
+     *
+     * 放在这里而不是主进程的 BrowserWindow 选项里，是因为**数据结构版本**
+     * （schemaVersion）只有 core 知道，主进程那边只能写死应用版本。
+     */
+    document.title = `${state.info.name} ${state.info.version} · 数据结构 v${state.info.schemaVersion}`;
 
     /*
      * 数据目录不可用就**到此为止**，别再去读工作区。

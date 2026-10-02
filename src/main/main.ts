@@ -146,8 +146,14 @@ function createWindow(): void {
     height: 860,
     minWidth: 940,
     minHeight: 620,
-    // 标题栏只留应用名，不带版本号 —— 版本在「字段与格式」页和 --version 里看
-    title: APP_NAME,
+    /*
+     * 标题栏里带上版本号。
+     *
+     * 界面上原来在两处显示版本：左上角的应用名旁边、以及右下角数据目录那条。
+     * 两处都去掉了 —— 那些位置该留给工作区和操作。标题栏是唯一还合适的落点：
+     * 它本来就写着应用名，宽度也够，而且用户要报版本号时第一眼就会看标题栏。
+     */
+    title: `${APP_NAME} ${APP_VERSION}`,
     /*
      * `backgroundColor` 对齐 `--bg`：首帧防白闪。
      *
@@ -549,6 +555,8 @@ function registerHandlers(): void {
           let items: number | null = null;
           let moves: number | null = null;
           let purgeable = 0;
+          /** 过期 + 15 天内到期的条数。null = 读不出来 */
+          let pending: number | null = null;
           let dbBytes: number | null = null;
           let integrityOk: boolean | null = null;
           try {
@@ -576,6 +584,23 @@ function registerHandlers(): void {
             } catch {
               purgeable = 0;
             }
+
+            /*
+             * 「待办」= 已经过期的 + 15 天内要到期的。
+             *
+             * 这一列替代了原来的「清理已用完」按钮：那个按钮只是把"用完的东西"
+             * 从列表里扫掉，属于**收拾**；而工作区列表真正该回答的是
+             * 「哪个工作区有东西要处理」。过期和临期才是要处理的事。
+             *
+             * 长期物品不计入 —— "没有到期日"就是"不用管"，
+             * 算进待办会让每个工作区都显示一个永远不消的数字。
+             */
+            try {
+              const ov = computeOverview(w, workspaceDbPath(dd, w));
+              pending = ov.counts.expired + ov.counts.soon;
+            } catch {
+              pending = null;
+            }
           }
           return {
             id: w.id,
@@ -589,6 +614,7 @@ function registerHandlers(): void {
             items,
             moves,
             purgeable,
+            pending,
             dbBytes,
             integrityOk,
             /** 'ok' | 'importing' | 'quarantined'。界面据此禁止操作并显示修复指引 */
