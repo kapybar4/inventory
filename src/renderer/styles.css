@@ -1257,7 +1257,14 @@ tbody tr.stock-sub td {
   align-items: center;
   gap: 8px;
   padding: 7px 12px;
-  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  /*
+   * 上方圆角必须与下面 `.group-section > .table-wrap` 的下方圆角**用同一个变量**。
+   *
+   * 两处原来一个 `--r-sm`（6px）一个 `--r`（9px）：标题与表格各画各的，
+   * 左上角两段圆弧对不上，外轮廓在接缝处错开 3px —— 看起来就是"没接好"。
+   * 轮廓要连续，前提是半径相同。
+   */
+  border-radius: var(--r) var(--r) 0 0;
   cursor: pointer;
   user-select: none;
   border-left: 2px solid transparent;
@@ -1293,8 +1300,10 @@ tbody tr.stock-sub td {
    * 用上方两角圆 + 下方两角直，让它和下面的表格连成一块。
    * 早先这里写的是 `border-radius: 0`，把基础规则整个盖掉 —— 于是悬停时
    * 露出一块方角矩形，紧挨着一个圆角表格，很割裂。
+   *
+   * 半径与 `.group-section > .table-wrap` 保持一致，外轮廓才连得上。
    */
-  border-radius: var(--r-sm) var(--r-sm) 0 0;
+  border-radius: var(--r) var(--r) 0 0;
   padding-top: 10px;
   padding-bottom: 8px;
 }
@@ -1389,8 +1398,21 @@ tbody tr.stock-sub td {
   color: var(--warn);
 }
 
+/*
+ * 组内容容器。
+ *
+ * 原来这里有 `padding-left: 6px`，用途是给**嵌套的子组**做视觉层次
+ * （二级比一级缩进一点）。但物品表格也装在这个容器里 ——
+ * 于是表格被一起推右了 6px，而组标题是横跨全宽的：
+ * 标题左边缘在 16px、表格在 22px，左边对不齐，
+ * 再加上标题左边那条 2px 的竖线（置顶组是琥珀色的），
+ * 接缝处看着就是"没接上"。
+ *
+ * 分组现在固定一级（不再有子组），这个缩进已经没有对象，
+ * 去掉即可让标题与表格的左边缘落在同一条线上。
+ */
 .group-body {
-  padding-left: 6px;
+  padding-left: 0;
 }
 
 /* 拖动状态 */
@@ -1720,11 +1742,20 @@ p.muted,
 /*
  * 分组里的表格：**上方两角要直**，和上面那条组标题接成一块。
  *
- * 这条必须放在 `.table-wrap` 基础规则**之后** —— 两者特异性相同，
- * 靠后写的赢。早先它写在文件更靠前的位置，被基础规则整个盖掉，
- * 于是标题方角、表格圆角，中间还夹一道边框，看着像两个东西拼在一起。
+ * 选择器必须是 `.group-body > .table-wrap` —— 表格的父元素是
+ * `.group-body`（组标题与组内容是兄弟），**不是** `.group-section`。
+ * 这条以前写的是 `.group-section > .table-wrap`（子选择器），
+ * 于是从来没匹配上过：规则一直在，只是永远不生效，
+ * 所以"上方两角直"这个意图从来没实现过。这类错误不报错、devtools 也不提示，
+ * 只能靠 `element.matches()` 去问。
+ *
+ * 下方两角用 `--r`，与 `.group-head` 的**上方**两角同值：
+ * 标题的上边缘和表格的下边缘是这一块的外轮廓，半径一致才连成一条曲线。
+ * `border-top-color: transparent` 让标题与表格之间那道内部分界线消失。
+ *
+ * 位置也要紧跟在 `.table-wrap` 基础规则之后 —— 两者特异性相同，靠后写的赢。
  */
-.group-section > .table-wrap {
+.group-body > .table-wrap {
   border-radius: 0 0 var(--r) var(--r);
   border-top-color: transparent;
   margin-top: 0;
