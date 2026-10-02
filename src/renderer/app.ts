@@ -277,41 +277,9 @@ interface ItemDetail {
   moves: MoveRow[];
 }
 
-/** 时间轴上的一格 */
-interface TimeSlot {
-  start: string;
-  end: string;
-  /** 横轴上的标注。空串 = 这一格不写字（只画格线） */
-  label: string;
-  current: boolean;
-  /** 是不是某一周的第一天（周一）。今天恰好是周一时两者同时为真 */
-  weekStart: boolean;
-  /** 标注种类，用来上色：今天 / 某周开始 / 月初 */
-  labelKind?: 'today' | 'week' | 'month';
-}
-
-interface TimelineEntry {
-  itemUuid: string;
-  itemName: string;
-  kind: string;
-  expiresOn: string;
-  daysLeft: number;
-  daysLeftText: string;
-  expired: boolean;
-  slot: number;
-  location: string;
-  remaining: number;
-  isBulk: boolean;
-  unit: string;
-}
-
-interface TimelineData {
-  today: string;
-  slots: TimeSlot[];
-  categories: { key: string; label: string; count: number }[];
-  groups: { key: string; label: string; entries: TimelineEntry[]; longTerm: { itemUuid: string; itemName: string; remaining: number; unit: string }[] }[];
-  counts: { dated: number; longTerm: number };
-}
+// 时间轴页已取消，「时间轴上的一格 / 一条到期项 / 整页数据」三个类型
+// 曾经定义在这里。命令行 `timeline` 仍在（它直接用 core 的
+// `buildTimelineSlots`），只是界面不再有这一页 —— 见 index.html 里的说明。
 
 interface WsStats {
   id: string;
@@ -463,11 +431,6 @@ interface DshApi {
    * 剩余时间是算出来的，过了零点要重画。返回退订函数。
    */
   onDateChanged(fn: () => void): () => void;
-  /** 时间轴 */
-  timeline: {
-    /** 范围与粒度都固定，不再有参数 */
-    data(wsId: string | null): Promise<TimelineData>;
-  };
   io: {
     exportWs(wsId?: string | null): Promise<{
       canceled: boolean;
@@ -504,11 +467,15 @@ const state: {
   wsList: WsList | null;
   wsId: string | null;
   alert: AlertSummary | null;
-  timeline: TimelineData | null;
-  timelineCategory: string;
   items: ItemRow[];
   detail: ItemDetail | null;
-  tab: 'dashboard' | 'groups' | 'timeline' | 'items' | 'workspaces' | 'schema';
+  /*
+   * `'timeline'` 从联合类型里去掉了 —— 页签已取消，留着它会让
+   * `setTab('timeline')` 这类调用编译得过，而那是一个到不了的页面。
+   * （`'workspaces'` / `'schema'` 仍是合法值：它们只是页签隐藏，
+   * 分别由返回箭头和排查问题时进入。）
+   */
+  tab: 'dashboard' | 'groups' | 'items' | 'workspaces' | 'schema';
   filter: { search: string; category: string };
   /** 分组页：服务端算好的树 + 本地筛选 */
   groupTree: GroupTreeResult | null;
@@ -568,8 +535,6 @@ const state: {
   wsList: null,
   wsId: null,
   alert: null,
-  timeline: null,
-  timelineCategory: '',
   items: [],
   detail: null,
   tab: 'dashboard',
@@ -1039,15 +1004,6 @@ async function refreshAlerts(): Promise<void> {
   state.alert = await window.api.alert.summary(state.wsId);
 }
 
-/** 时间轴数据（粒度或工作区变了才需要重新算） */
-async function loadTimeline(): Promise<void> {
-  if (!state.wsId) {
-    state.timeline = null;
-    return;
-  }
-  state.timeline = await window.api.timeline.data(state.wsId);
-}
-
 /** 拉分组树（层级、排序字段、组顺序都由工作区偏好决定） */
 async function loadGroupTree(): Promise<void> {
   if (!state.wsId) {
@@ -1224,7 +1180,7 @@ async function refreshItems(): Promise<void> {
 
 async function reloadAll(): Promise<void> {
   await refreshWorkspaces();
-  await Promise.all([refreshAlerts(), refreshItems(), loadTimeline(), loadGroupTree(), loadColumns()]);
+  await Promise.all([refreshAlerts(), refreshItems(), loadGroupTree(), loadColumns()]);
   renderBanner();
   render();
 }
@@ -1277,7 +1233,10 @@ function renderBanner(): void {
   };
 
   if (expired > 0) add(`${expired} 项已过期`, 'danger', () => setTab('groups'));
-  if (soon > 0) add(`${soon} 项 ${SOON_TEXT} 天内到期`, 'info', () => setTab('timeline'));
+  // 「15 天内到期」原来跳时间轴。时间轴页已取消（见 index.html 与 render() 里的说明），
+  // 改跳分组页 —— 那里按分类列出全部物品，也带到期时间与剩余天数，
+  // 是现在"看看哪些快到点了"最直接的去处。
+  if (soon > 0) add(`${soon} 项 ${SOON_TEXT} 天内到期`, 'info', () => setTab('groups'));
   if (lowStock > 0) add(`${lowStock} 项待补货`, 'info', () => setTab('items'));
   /*
    * 长期物品**不在这里出现**。
@@ -1358,9 +1317,6 @@ function render(): void {
       break;
     case 'groups':
       renderGroups(view);
-      break;
-    case 'timeline':
-      renderTimeline(view);
       break;
     case 'items':
       renderItems(view);
@@ -2367,246 +2323,6 @@ function collectSiblings(nodes: GroupNode[], parentPathKey: string): string[] | 
 let draggingUuid: string | null = null;
 let draggingGroup: string | null = null;
 
-// ─────────────────────────────────────────────────────────────
-// 时间轴
-// ─────────────────────────────────────────────────────────────
-
-/**
- * 时间轴视图。
- *
- * 横轴是按粒度切好的时间格，每一行是一件物品；
- * 到期日落在哪一格，条就画到哪一格。可以横向拉动，鼠标悬停会整列高亮，
- * 这样「同一段时间里有多少东西要到期」一眼就能看出来。
- *
- * 数据完全来自 `timeline:data`，粒度切换与横向滚动都只是重画，不查库。
- */
-function renderTimeline(view: HTMLElement): void {
-  const data = state.timeline;
-  if (!data) {
-    view.append(el('div', { class: 'empty', text: '正在计算时间轴…' }));
-    return;
-  }
-
-  view.classList.add('no-pad');
-
-  // ── 工具栏 ──
-  const bar = el('div', { class: 'toolbar tl-toolbar' });
-
-  /*
-   * 粒度选择器已取消：时间轴固定按天，范围固定为「上周一 ~ 下下周日」。
-   * 留一个只有一种可选项的下拉没有意义。
-   */
-  bar.append(
-    el('span', {
-      class: 'tl-range',
-      text: `${data.slots[0]?.start.slice(5) ?? ''} ~ ${data.slots[data.slots.length - 1]?.end.slice(5) ?? ''}`,
-    }),
-  );
-
-  // 悬停时在这里显示「哪一格、那一格有几项到期」
-  const hint = el('span', { class: 'tl-hint', id: 'tl-hint' });
-  bar.append(hint);
-
-  // 分类筛选（第 6 条）
-  const catSel = select(
-    'tlCat',
-    [{ value: '', label: '全部分类' }, ...data.categories.map((c) => ({ value: c.key, label: `${c.label}（${c.count}）` }))],
-    state.timelineCategory,
-  );
-  catSel.addEventListener('change', () => {
-    state.timelineCategory = catSel.value;
-    render();
-  });
-  bar.append(el('span', { class: 'tl-label', text: '分类' }), catSel);
-
-  const todayBtn = el('button', { class: 'ghost small', text: '回到今天' });
-  todayBtn.addEventListener('click', () => {
-    $('#tl-scroll')?.querySelector('.tl-today')?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
-  });
-  bar.append(todayBtn);
-
-  bar.append(
-    el('span', {
-      class: 'muted small',
-      text: `${data.counts.dated} 项有到期日 · ${data.counts.longTerm} 项长期`,
-    }),
-  );
-
-  view.append(bar);
-
-  // ── 时间轴本体 ──
-  const scroll = el('div', { class: 'tl-scroll', id: 'tl-scroll' });
-  const inner = el('div', { class: 'tl-inner' });
-
-  // 只有一种粒度了，宽度写死一处
-  const SLOT_W = 34;
-  inner.style.setProperty('--slot-w', `${SLOT_W}px`);
-
-  const groups = state.timelineCategory
-    ? data.groups.filter((g) => g.key === state.timelineCategory)
-    : data.groups;
-
-  // 表头：时间格
-  const headRow = el('div', { class: 'tl-head' });
-  headRow.append(el('div', { class: 'tl-row-label tl-corner', text: '物品' }));
-  const headSlots = el('div', { class: 'tl-slots' });
-  data.slots.forEach((s, i) => {
-    /*
-     * 标注分三种（见 main.ts 的 buildSlots）：今天、某周开始、月初。
-     * 其余格子留空但**仍然画出格线** —— 每一格代表一天这个事实不变，
-     * 只是不给每个日期都写字，否则 28 个日期挤成一片没法看。
-     */
-    const kind = `${s.labelKind ? ` tl-slot-${s.labelKind}` : ''}${s.weekStart ? ' tl-week-start' : ''}`;
-    const cell = el('div', {
-      class: `tl-slot-head${kind}${s.current ? ' tl-today' : ''}`,
-      text: s.label,
-    });
-    cell.dataset['slot'] = String(i);
-    // 悬停任何一格都能知道那是哪天 —— 没标字不代表没信息
-    cell.title = s.current ? `今天 ${s.start}` : s.start;
-    if (s.labelKind) cell.dataset['labelKind'] = s.labelKind;
-    headSlots.append(cell);
-  });
-  headRow.append(headSlots);
-  inner.append(headRow);
-
-  // 每个分类一段
-  let drawn = 0;
-  for (const g of groups) {
-    if (g.entries.length === 0 && g.longTerm.length === 0) continue;
-    drawn += 1;
-
-    const sec = el('div', { class: 'tl-group' });
-    sec.append(el('div', { class: 'tl-group-title', text: `${g.label}　${g.entries.length} 项` }));
-
-    // 有到期日的：每行一条，条画在所属的时间格上
-    for (const e of g.entries) {
-      const row = el('div', { class: 'tl-row' });
-
-      const label = el('div', { class: 'tl-row-label' });
-      const link = el('a', { class: 'link', text: e.itemName });
-      link.addEventListener('click', () => void openItem(e.itemUuid));
-      label.append(link);
-      label.title = `${e.location || '—'} · ${e.kind} · ${e.expiresOn}`;
-      row.append(label);
-
-      const track = el('div', { class: 'tl-slots tl-track' });
-      data.slots.forEach((s, i) => {
-        const cell = el('div', { class: `tl-slot${s.current ? ' tl-today' : ''}` });
-        cell.dataset['slot'] = String(i);
-        if (i === e.slot) {
-          // 这条物品的到期日就落在这一格
-          const bar = el('div', {
-            class: `tl-bar${e.expired ? ' expired' : ''}`,
-            text: e.expiresOn.slice(5),
-          });
-          bar.dataset['slot'] = String(i);
-          bar.title = `${e.itemName}　${e.kind}　${e.expiresOn}　${e.daysLeftText}`;
-          bar.addEventListener('click', () => void openItem(e.itemUuid));
-          cell.append(bar);
-        }
-        track.append(cell);
-      });
-      /*
-       * 到期日落在 4 周窗口之外的条目，只留一个贴边的箭头标记。
-       *
-       * 原来这里写的是「2026-08-18（超出范围）」这一整串文字，贴在轨道最左边。
-       * 28 天窗口下**绝大多数条目都在范围外**，于是每一行都拖出一串长文本，
-       * 溢出到相邻行、还被表头压住 —— 看起来就是一片乱码。
-       * 而且那串字本身就自相矛盾：能看到「超出范围」四个字，
-       * 就说明它已经被显示出来了。
-       *
-       * 现在只放一个方向箭头：具体日期在行标题的悬停提示里，点开物品也能看到。
-       */
-      if (e.slot < 0) {
-        const outside = el('div', { class: 'tl-outside', text: '‹' });
-        outside.title = `${e.expiresOn}（不在本时间轴范围内）`;
-        track.append(outside);
-      }
-      row.append(track);
-      sec.append(row);
-    }
-
-    // 长期：不占时间格，单独一行灰字
-    if (g.longTerm.length > 0) {
-      const row = el('div', { class: 'tl-row tl-row-longterm' });
-      row.append(el('div', { class: 'tl-row-label', text: '长期' }));
-      const names = el('div', { class: 'tl-slots tl-longterm' });
-      for (const l of g.longTerm) {
-        const link = el('a', { class: 'link', text: l.itemName });
-        link.addEventListener('click', () => void openItem(l.itemUuid));
-        names.append(link);
-      }
-      row.append(names);
-      sec.append(row);
-    }
-
-    inner.append(sec);
-  }
-
-  if (drawn === 0) {
-    inner.append(el('div', { class: 'empty', text: '这个筛选下没有物品。' }));
-  }
-
-  scroll.append(inner);
-  view.append(scroll);
-
-  wireTimelineHover(scroll, data);
-
-  // 首次渲染后自动滚到今天那一格，省得用户自己找
-  const todayCell = scroll.querySelector('.tl-today');
-  if (todayCell) {
-    requestAnimationFrame(() => {
-      const el2 = todayCell as HTMLElement;
-      scroll.scrollLeft = Math.max(0, el2.offsetLeft - scroll.clientWidth / 2);
-    });
-  }
-}
-
-/**
- * 悬停高亮：鼠标落在哪一格，整列都亮起来。
- *
- * 用事件委托而不是给每个格子挂监听 —— 日粒度下格子有几百个，
- * 逐个挂监听会明显拖慢首次渲染。
- */
-function wireTimelineHover(root: HTMLElement, data: TimelineData): void {
-  const highlight = (slot: string | null): void => {
-    root.querySelectorAll('.tl-hover').forEach((n) => n.classList.remove('tl-hover'));
-    if (slot === null) return;
-    root.querySelectorAll(`[data-slot="${slot}"]`).forEach((n) => n.classList.add('tl-hover'));
-  };
-
-  root.addEventListener('mouseover', (ev) => {
-    const target = (ev.target as HTMLElement).closest('[data-slot]') as HTMLElement | null;
-    highlight(target?.dataset['slot'] ?? null);
-  });
-  root.addEventListener('mouseleave', () => highlight(null));
-
-  // 悬停时在工具栏显示这一格的信息
-  const hint = $('#tl-hint');
-  if (!hint) return;
-  root.addEventListener('mousemove', (ev) => {
-    const target = (ev.target as HTMLElement).closest('[data-slot]') as HTMLElement | null;
-    if (!target) {
-      hint.textContent = '';
-      return;
-    }
-    const i = Number(target.dataset['slot']);
-    const s = data.slots[i];
-    if (!s) {
-      hint.textContent = '';
-      return;
-    }
-    const n = groups_count(data, i);
-    hint.textContent = `${s.start}${s.end !== s.start ? ` ~ ${s.end}` : ''}　${n} 项到期`;
-  });
-}
-
-function groups_count(data: TimelineData, slot: number): number {
-  let n = 0;
-  for (const g of data.groups) for (const e of g.entries) if (e.slot === slot) n += 1;
-  return n;
-}
 
 /**
  * 可配置的物品列。

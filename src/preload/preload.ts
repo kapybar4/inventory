@@ -103,10 +103,7 @@ const api = {
     ipcRenderer.on('date:changed', listener);
     return () => ipcRenderer.removeListener('date:changed', listener);
   },
-  /** 时间轴 */
-  timeline: {
-    data: (wsId: string | null) => call('timeline:data', wsId),
-  },
+  /** 时间轴那条 IPC 已随页面一起移除 —— 命令行 `timeline` 不经过这里 */
   io: {
     /** 传一个 id 或一组 id：多个时导出成多工作区包 */
     exportWs: (wsIds: string | string[]) => call('io:export', wsIds),

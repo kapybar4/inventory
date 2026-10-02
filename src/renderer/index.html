@@ -23,8 +23,22 @@
         <nav id="tabs">
           <button data-tab="dashboard" class="tab active">概览</button>
           <button data-tab="groups" class="tab">分组</button>
-          <button data-tab="timeline" class="tab">时间轴</button>
-          <button data-tab="items" class="tab">物品</button>
+          <button data-tab="items" class="tab">明细</button>
+          <!--
+            「时间轴」页取消了。
+
+            它回答的是"同一段时间里有多少东西要到期"，但那个问题
+            横幅已经报了数、分组页也按分类列出了到期时间与剩余天数 ——
+            为它单开一页（一条横向时间轴 + 28 格 × N 行的轨道）不值得：
+            轨道上真正要看的信息只有"哪些挤在一起"，而那从列表的到期日
+            一列就能看出来，还不用横向滚动。
+
+            命令行 `dsh-inv timeline` **保留**（脚本要用结构化数据），
+            所以 core/timeline.ts 与它那几个测试都还在。
+            要恢复这一页：这个按钮加回来、`state.tab` 的联合类型里补上
+            `'timeline'`、`render()` 的 switch 里补一个分支、
+            再把 `timeline:data` 这条 IPC（preload + main）加回来。
+          -->
           <!--
             「工作区」不再是常驻页签。它是"换个地方"这种低频动作，
             占着一个页签的位置不值得；入口改成工作区下拉框左边那个返回箭头。

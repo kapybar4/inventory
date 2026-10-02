@@ -50,7 +50,7 @@ import {
   nextItemCode,
   type Row,
 } from '../core/db';
-import { computeOverview, groupByCategory, expiriesForItem, leadDaysFor, lowStockItems } from '../core/alerts';
+import { computeOverview, expiriesForItem, leadDaysFor, lowStockItems } from '../core/alerts';
 import {
   buildTree,
   uncategorizedCount,
@@ -84,7 +84,6 @@ import { formatDaysLeft, daysUntil, today } from '../core/dates';
 import { centsToYuan, yuanToCents, parseExtra, serializeExtra } from '../core/values';
 import { formatBytes } from '../core/util';
 import { bootstrapPath, clearBootstrap, writeBootstrap } from '../core/bootstrap';
-import { buildTimelineSlots, slotIndexOf } from '../core/timeline';
 
 /**
  * 把 Chromium 的 profile 目录从**漫游** AppData 挪到**本地** AppData。
@@ -1193,53 +1192,6 @@ function registerHandlers(): void {
       groupSort: updated.groupSort ?? {},
       collapsed: updated.collapsed ?? [],
     };
-  });
-
-  handle('timeline:data', (wsId) => {
-    return withDb(wsId ? asString(wsId, 'wsId') : null, true, (db) => {
-      const rows = selectWhere(db, 'items', `${TOP_LEVEL} AND status IN ('in_stock','in_use')`, []);
-      const now = new Date();
-      // 范围与粒度都固定了，不再接受参数 —— 见 core/timeline.ts 的说明
-      const slots = buildTimelineSlots(now);
-
-      const groups = groupByCategory(rows, now).map((g) => ({
-        key: g.key,
-        label: g.label,
-        entries: g.entries.map((e) => ({
-          itemUuid: String(e.item['uuid'] ?? ''),
-          itemName: String(e.item['name'] ?? ''),
-          kind: e.kind,
-          expiresOn: e.expiresOn,
-          daysLeft: e.daysLeft,
-          daysLeftText: e.daysLeftText,
-          expired: e.expired,
-          slot: slotIndexOf(e.expiresOn, slots),
-          location: e.item['container'] ?? null,
-          remaining: Number(e.item['remaining'] ?? 0),
-          isBulk: e.item['is_bulk'] === 'true',
-          unit: e.item['unit'] === null ? '' : String(e.item['unit'] ?? ''),
-        })),
-        longTerm: g.longTerm.map((l) => ({
-          itemUuid: String(l.item['uuid'] ?? ''),
-          itemName: String(l.item['name'] ?? ''),
-          remaining: Number(l.item['remaining'] ?? 0),
-          unit: l.item['unit'] === null ? '' : String(l.item['unit'] ?? ''),
-        })),
-      }));
-
-      return {
-        today: today(now),
-        slots,
-        categories: groups
-          .map((g) => ({ key: g.key, label: g.label, count: g.entries.length + g.longTerm.length }))
-          .filter((c) => c.count > 0),
-        groups: groups.filter((g) => g.entries.length > 0 || g.longTerm.length > 0),
-        counts: {
-          dated: groups.reduce((n, g) => n + g.entries.length, 0),
-          longTerm: groups.reduce((n, g) => n + g.longTerm.length, 0),
-        },
-      };
-    });
   });
 
   handle('item:consume', (wsId, uuid, qty, reason) => {
