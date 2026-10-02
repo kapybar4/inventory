@@ -127,30 +127,20 @@ td,
   -webkit-app-region: no-drag;
 }
 
-.brand {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  white-space: nowrap;
-  font-size: 14px;
-  letter-spacing: 0.2px;
-}
-
-.brand .mark {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  background: linear-gradient(135deg, var(--accent), var(--violet));
-  align-self: center;
-  box-shadow: 0 0 12px rgba(91, 157, 255, 0.5);
-}
-
-.brand strong {
-  font-weight: 600;
-}
-
+/*
+ * 工作区选择器，以及它左边的返回箭头。
+ *
+ * 两者做成一个 flex 行并 `align-items: center` ——
+ * 早先这是两个并排的顶栏子项，各自按自己的内容高度对齐，
+ * 返回箭头（26px 方形图标按钮）和下拉框（有内边距的按钮）基线不一样，
+ * 看着就是一高一低。包进同一个 flex 行之后它们天然共用一个水平中轴。
+ */
 .ws-picker {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 }
 
 .wsp-trigger {
@@ -201,11 +191,24 @@ td,
   flex: 0 0 auto;
 }
 
+/*
+ * 下拉框的三角形。
+ *
+ * 原来 10px 又用 `--fg-faint`（很淡的灰），在这套纯黑底上几乎看不见 ——
+ * "这里能点开"这个唯一的视觉线索太弱了。
+ * 调到 13px、换成更亮的 `--fg-dim`，并在悬停触发器时进一步提亮到 `--fg`。
+ */
 .wsp-caret {
-  color: var(--fg-faint);
-  font-size: 10px;
-  transition: transform 0.15s;
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1;
+  transition: transform 0.15s, color 0.15s;
   flex: 0 0 auto;
+}
+
+.wsp-trigger:hover .wsp-caret,
+.wsp-trigger.open .wsp-caret {
+  color: var(--fg);
 }
 
 .wsp-trigger.open .wsp-caret {
@@ -1300,13 +1303,17 @@ tbody tr.stock-sub td {
 .group-head .caret {
   border: none;
   background: transparent;
-  color: var(--fg-faint);
-  font-size: 10px;
+  color: var(--fg-dim);
+  font-size: 13px;
   line-height: 1;
   padding: 2px 4px;
   cursor: pointer;
-  transition: transform 0.15s;
+  transition: transform 0.15s, color 0.15s;
   flex: 0 0 auto;
+}
+
+.group-head .caret:hover {
+  color: var(--fg);
 }
 
 .group-head .caret.collapsed {
@@ -2735,8 +2742,8 @@ td.wrap {
     gap: 10px;
     padding: 0 10px;
   }
-  .brand span:not(.mark) {
-    display: none;
+  .wsp-trigger {
+    max-width: 200px;
   }
   .card-value {
     font-size: 22px;

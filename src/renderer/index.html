@@ -13,13 +13,12 @@
     <div id="app">
       <header id="topbar">
         <!--
-          左上角原来有一个应用名 + 版本号（「Inventory v0.1.0 · 数据结构 v9」）。
-          去掉了：这一行每个像素都该用来放工作区与导航，而"这是什么程序"
-          从窗口标题栏就能看到 —— 版本号现在也在那里。
+          左上角原来有一个品牌块：一个紫蓝渐变的方块 + 应用名 + 版本号。
+          三样都去掉了。
+          方块只是个装饰，却占着顶栏最左边、最容易被看到的位置；
+          应用名和版本号从窗口标题栏就能看到。
+          顶栏这一行现在只放工作区与导航。
         -->
-        <div class="brand">
-          <span class="mark"></span>
-        </div>
         <div class="ws-picker" id="ws-picker"></div>
         <nav id="tabs">
           <button data-tab="dashboard" class="tab active">概览</button>
