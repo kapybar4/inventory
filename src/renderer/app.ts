@@ -1029,7 +1029,19 @@ async function loadGroupTree(): Promise<void> {
    * 靠"表里没有"表达），所以这里拿到的就是"设过的那些组"。
    */
   state.groupSort = (state.groupTree.groupSort as typeof state.groupSort) ?? {};
-  state.collapsed = new Set(state.groupTree.collapsed);
+  /*
+   * 收起状态**不再从服务端读** —— 分组页默认全部展开。
+   *
+   * 原来它是存在工作区注册表里的（`collapsed` 数组），于是"上次收起了哪几组"
+   * 会跟到下一次打开。但用户的原话是"分类页面默认全部展开"：
+   * 每次进来都该看到全部内容，收起只是**这一次**的临时动作。
+   *
+   * 所以这一份现在是纯内存状态：`state.collapsed` 每次加载都清空，
+   * 页面内点收起照常生效，重画/换工作区就回到全展开。
+   * 服务端那个字段留着不读（老数据里的值会被忽略），
+   * 这样不用写迁移，也不会因为旧值把界面锁成收起态。
+   */
+  state.collapsed = new Set();
   // 分组接口顺带把列配置带回来了，省一次往返
   if (Array.isArray(state.groupTree.columns)) state.columnVisible = state.groupTree.columns;
 }
@@ -1741,8 +1753,13 @@ function renderGroups(view: HTMLElement): void {
     });
     collapseBtn.title = allCollapsed ? '展开所有分组' : '收起所有分组';
     collapseBtn.addEventListener('click', () => {
+      /*
+       * 只改内存状态，**不存**。
+       *
+       * "默认全部展开"意味着下次打开一定要是展开的；把它存下来，
+       * 那一次"全部收起"就会变成永久的默认，与需求相反。
+       */
       state.collapsed = allCollapsed ? new Set() : new Set(allKeys);
-      void savePrefs({ collapsed: [...state.collapsed] });
       render();
     });
     bar.append(collapseBtn);
@@ -1901,7 +1918,7 @@ function toggleCollapse(key: string, sec: HTMLElement | null): void {
   const opening = state.collapsed.has(key);
   if (opening) state.collapsed.delete(key);
   else state.collapsed.add(key);
-  void savePrefs({ collapsed: [...state.collapsed] });
+  // **不存**：分组页默认全展开，收起只是这一次的临时动作（见 loadGroupTree）
 
   /*
    * **就地切换类，不调 render()。**
@@ -2079,7 +2096,8 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
 
   const t = el('table', { class: 'items group-items' });
   const head = el('tr');
-  if (draggable) head.append(el('th', { class: 'seq', text: '' }));
+  // 手柄列**恒在**（不能拖时也占位，避免整行左右跳，见下面物品行的说明）
+  head.append(el('th', { class: 'seq drag-col', text: '' }));
   head.append(el('th', { class: 'col-extra', text: '' }));
   head.append(el('th', { class: 'seq right', text: '#' }));
   for (const c of cols) {
@@ -2089,8 +2107,9 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
   head.append(el('th', { class: 'right', text: '' }));
   t.append(el('thead', {}, head));
 
-  // colspan：手柄(可选) + 展开箭头 + 位次 + 配置列 + 操作
-  const colSpan = cols.length + 3 + (draggable ? 1 : 0);
+  // colspan：手柄 + 展开箭头 + 位次 + 配置列 + 操作
+  // 手柄那一列**恒在**（不能拖时也渲染，见下面），所以不再按 draggable 加减
+  const colSpan = cols.length + 4;
 
   const body = el('tbody');
   body.dataset['path'] = pathKey(node.path);
@@ -2099,11 +2118,21 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
   items.forEach((it, i) => {
     const tr = el('tr', { class: 'item-row' });
     tr.dataset['uuid'] = it.uuid;
+    /*
+     * 拖动手柄**始终渲染**，被排序的组只是把它置为不可拖。
+     *
+     * 早先是"不能拖就整个 td 不生成"，于是点了列头排序之后这一列凭空消失，
+     * **整行会往左跳一格** —— 用户正在看的那一列位置全变了，
+     * 视线得重新找一遍。留着手柄、只是拖不动，位置就稳住了；
+     * 也顺带把"为什么拖不动"写在手柄的悬停提示里。
+     */
+    const grip = el('td', { class: `drag-handle${draggable ? '' : ' locked'}` });
+    grip.append(el('span', { class: 'grip', text: '⋮⋮' }));
+    grip.title = draggable ? '拖动改变顺序' : '这一组已按列排序，不能拖动；再点一次同一个箭头即可恢复';
+    if (!draggable) grip.setAttribute('aria-disabled', 'true');
+    tr.append(grip);
     if (draggable) {
       tr.draggable = true;
-      const grip = el('td', { class: 'drag-handle', text: '⋮⋮' });
-      grip.title = '拖动改变顺序';
-      tr.append(grip);
       makeItemDraggable(tr, body);
     }
 
@@ -3856,12 +3885,16 @@ function openItemForm(uuid: string | null): void {
   bulkWrap.append(bulkBox, el('span', { text: '批量物品（需要按个数管理，如抽纸 / 电池 / 口罩）' }));
   const bulkField = el('div', { class: 'field span-2' });
   bulkField.append(bulkWrap);
-  bulkField.append(
-    el('span', {
-      class: 'field-hint',
-      text: '不开启时数量恒为 1，操作是「消耗」一次归零；开启后才能设数量、多次领用、设最低库存',
-    }),
-  );
+  /*
+   * 这句说明挪进悬停提示。
+   *
+   * 它是"看一次就记住"的规则 —— 而且只在**第一次**勾这个框之前有用，
+   * 却常驻占着一整行，把下面真正要填的「数量」推下去。
+   * 挂在勾选框旁边那个 `?` 上，需要时悬停即得。
+   *
+   * 提示用 `hoverTip()` 自己画（不用原生 `title`）—— 见 AGENTS.md 那条规则。
+   */
+  bulkWrap.append(hoverTip('不开启时数量恒为 1，操作是「消耗」一次归零；开启后才能设数量、多次领用、设最低库存'));
   body.append(bulkField);
 
   const qtyInput = input('quantity', String(existing?.quantity ?? 1), 'number');

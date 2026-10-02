@@ -1226,6 +1226,24 @@ tbody tr.item-row:hover td.drag-handle {
   opacity: 1;
 }
 
+/*
+ * 这一组已被排序 → 手柄还在，但拖不动。
+ *
+ * **位置必须保留**：早先是"不能拖就整个 td 不生成"，于是点一下列头排序，
+ * 这一列凭空消失、整行往左跳一格 —— 正在看的那几列位置全变了，
+ * 视线得重新找一遍。留着它、只是拖不动，表格就不会动。
+ *
+ * 表达"拖不动"用 `cursor: not-allowed` + **悬停不变亮**：
+ * 光标是系统画的，用户一看就知道这里点不动，比"图标消失"清楚得多
+ * （图标消失还有第二种解释：这个功能被删了）。
+ * 透明度比可拖时更低一点，把"这个是死的"也一并说明。
+ */
+td.drag-handle.locked,
+tbody tr.item-row:hover td.drag-handle.locked {
+  cursor: not-allowed;
+  opacity: 0.28;
+}
+
 td.seq {
   width: 1%;
   color: var(--fg-faint);
