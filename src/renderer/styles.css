@@ -1319,14 +1319,55 @@ tbody tr.stock-sub td {
  *
  * 展开时标题下面是表格，所以下方两角是直角（与表格接成一块）；
  * 收起时下面什么都没有了，还留着直角就变成一块"缺了下半截"的方角。
- * 用 `:not(:has(> .group-body))` 判断：收起时渲染层根本不生成
- * `.group-body`（见 renderGroupNode），所以"没有它就等于收起了"，
- * 不需要再加一个 collapsed 类去同步状态。
+ *
+ * 判据是 `.group-section.collapsed` 这个类。早先用的是
+ * `:not(:has(> .group-body))`（"没有内容节点就等于收起了"）——
+ * 那个前提现在不成立了：内容节点为了能做过渡**始终留在 DOM 里**，
+ * 所以必须改看类。这也说明**"隐式判据"很脆**：
+ * 它和另一处实现细节（节点在不在）绑在一起，那边一改这边就悄悄失效。
  */
-.group-section:not(:has(> .group-body)) > .group-head {
+.group-section.collapsed > .group-head {
   border-radius: var(--r);
 }
 
+/*
+ * 组内容的收起 / 展开过渡。
+ *
+ * 内容节点**一直在 DOM 里**，收起态由父级 `.group-section.collapsed` 表达，
+ * 交给这里过渡。不删节点的原因：`render()` 重建出来的新节点没有"收起前"
+ * 的旧值，浏览器只能硬切 —— 那就是原来"啪"地一下的来源。
+ *
+ * 为什么用 `grid-template-rows: 0fr → 1fr`：
+ *   - `height: 0` 量不到"自动高度"（内容里混着 `<table>` 与绝对定位元素，
+ *     撑不起来也量不准）
+ *   - `scaleY(0)` 会把内容压成一团，收起过程中看着像被挤压变形
+ * `0fr → 1fr` 是真的把高度从 0 过渡到内容高度，且不改变内部布局。
+ *
+ * 外层是 grid（只有一行），内层 `overflow: hidden` 负责把内容裁掉；
+ * 两层缺一不可 —— 只给外层 `overflow: hidden` 的话，
+ * 内层的最小内容高度会把网格行撑开，收不到 0。
+ */
+.group-body {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition: grid-template-rows 0.24s ease;
+}
+
+.group-body-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.group-section.collapsed > .group-body {
+  grid-template-rows: 0fr;
+}
+
+/* 收起时内容不可交互（还在 DOM 里，但点不到） */
+.group-section.collapsed > .group-body-inner {
+  visibility: hidden;
+}
+
+/* 箭头跟着转。收起时指右、展开时指下 */
 .group-head .caret {
   border: none;
   background: transparent;
@@ -1335,7 +1376,7 @@ tbody tr.stock-sub td {
   line-height: 1;
   padding: 2px 4px;
   cursor: pointer;
-  transition: transform 0.15s, color 0.15s;
+  transition: transform 0.22s ease, color 0.15s ease;
   flex: 0 0 auto;
 }
 

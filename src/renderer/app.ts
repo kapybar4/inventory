@@ -1798,7 +1798,15 @@ function renderGroups(view: HTMLElement): void {
     const isCollapsed = state.collapsed.has(key);
 
     const sec = el('section', {
-      class: `group-section lv-${node.level}${node.pinned ? ' pinned' : ''}`,
+      /*
+       * 收起状态用**一个类**表达，不删节点。
+       *
+       * 原来收起时直接不生成 `.group-body`：那样 DOM 里"啪"地少一块，
+       * 浏览器没有可补间的起止值，只能硬切。
+       * 现在节点始终在，收起态由 `sec.collapsed` 交给 CSS 过渡
+       * （见 styles.css 的 `grid-template-rows: 0fr → 1fr`）。
+       */
+      class: `group-section lv-${node.level}${node.pinned ? ' pinned' : ''}${isCollapsed ? ' collapsed' : ''}`,
     });
     sec.dataset['path'] = key;
     sec.dataset['level'] = String(node.level);
@@ -1818,10 +1826,9 @@ function renderGroups(view: HTMLElement): void {
     caret.title = isCollapsed ? '展开' : '收起';
     caret.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      toggleCollapse(key);
+      toggleCollapse(key, sec);
     });
     head.append(caret);
-
     if (node.pinned) {
       head.append(el('span', { class: 'pin', text: '📌' }));
     } else {
@@ -1859,26 +1866,81 @@ function renderGroups(view: HTMLElement): void {
     // 「置顶 · 不可拖动」不再单独标：右边那个悬停说明把它们讲全了
     head.append(meta);
 
-    head.addEventListener('click', () => toggleCollapse(key));
+    head.addEventListener('click', () => toggleCollapse(key, sec));
     sec.append(head);
 
     // ── 组内容 ──
-    if (!isCollapsed) {
-      const body = el('div', { class: 'group-body' });
-      if (items.length > 0) body.append(groupItemsTable(items, node));
-      for (const k of kids) body.append(k);
-      sec.append(body);
-    }
+    // **收起时也照常生成**，只是外面套一层会被 CSS 收成 0 高度的容器 ——
+    // 节点必须在 DOM 里，过渡才有起止值可用（见 toggleCollapse 的说明）。
+    const body = el('div', { class: 'group-body' });
+    const inner = el('div', { class: 'group-body-inner' });
+    if (items.length > 0) inner.append(groupItemsTable(items, node));
+    for (const k of kids) inner.append(k);
+    body.append(inner);
+    sec.append(body);
 
     return sec;
   }
 }
 
-function toggleCollapse(key: string): void {
-  if (state.collapsed.has(key)) state.collapsed.delete(key);
+/**
+ * 收起 / 展开一个分组。
+ *
+ * ── 做法：内容节点**一直在 DOM 里**，只用类控制显示 ──
+ *
+ * 试过"先播动画再重画"那套（收起时把节点留在原地播完、展开时 render
+ * 之后再加起始态），但它依赖**动画事件和帧时序**：收起要等 transitionend
+ * 或一个超时兜底，展开要抢在浏览器绘制之前把起始态挂上。
+ * 这些在真实环境里都不稳 —— 少一次事件，内容就永远留在 DOM 里；
+ * 抢不到那一帧，浏览器就认为"没有变化"，动画整个不跑。
+ *
+ * 现在的做法把这些全绕开了：`buildGroupNode` **不再**在收起时跳过
+ * `.group-body`，节点始终在；收起态由 `sec.collapsed` 这一个类表达，
+ * 交给 CSS 过渡。没有事件、没有计时、也没有"起点必须被绘制过"的假设。
+ *
+ * 收起态用 `grid-template-rows: 0fr → 1fr`，而不是 `height` 或 `scaleY`：
+ *   - `height: 0` 量不到"自动高度"（内容里混着 `<table>` 和绝对定位元素）
+ *   - `scaleY(0)` 会把内容压成一团，收起过程中看着像被挤压变形
+ * `grid-template-rows` 是真的把高度从 0 过渡到内容高度，也不参与布局计算。
+ */
+function toggleCollapse(key: string, sec: HTMLElement | null): void {
+  const opening = state.collapsed.has(key);
+  if (opening) state.collapsed.delete(key);
   else state.collapsed.add(key);
   void savePrefs({ collapsed: [...state.collapsed] });
+
+  /*
+   * **就地切换类，不调 render()。**
+   *
+   * render() 会把整个组重建一遍，新节点没有"收起前"的旧值，
+   * 过渡就无从谈起 —— 这正是原来"啪"地一下的原因。
+   * 只改这一个类，浏览器手上有完整的起止状态，自己会补间。
+   *
+   * 局部更新不会和别处不同步：收起状态唯一的事实来源是 `state.collapsed`
+   * （上面已经改了），类只是它的投影。
+   */
+  const target = sec ?? findGroupSection(key);
+  if (target) {
+    target.classList.toggle('collapsed', !opening);
+    target.querySelector('.caret')?.classList.toggle('collapsed', !opening);
+    return;
+  }
+  // 找不到节点（理论上不该发生）才退回整页重画
   render();
+}
+
+/**
+ * 按 key 找组的 section。
+ *
+ * key 可能是**空字符串**（未分类那一组），所以不能用属性选择器
+ * `[data-path="..."]` —— 它匹配不到空属性，会让动效静默失效。
+ * 只能遍历比对。
+ */
+function findGroupSection(key: string): HTMLElement | null {
+  for (const s of Array.from(document.querySelectorAll<HTMLElement>('.group-section'))) {
+    if ((s.dataset['path'] ?? null) === key) return s;
+  }
+  return null;
 }
 
 /**
