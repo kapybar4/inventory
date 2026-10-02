@@ -1500,6 +1500,94 @@ test('分组与排序互相独立：排序关掉后回到手工顺序', () => {
   assert.deepEqual(back.nodes[0]!.items.map((r) => r['name']), ['先', '后']);
 });
 
+/**
+ * 每个分组各自的排序（`perGroup`）。
+ *
+ * 界面上点列头排序走的是这条路：**一个分类排了不影响别的分类**。
+ * 用 `perGroup` 而不是全局 `sort`，正是为了"药品按到期排、
+ * 日用品按名称排"能同时成立。
+ */
+test('每个分组各自的排序：互不影响，没设的组仍是手动顺序', () => {
+  const items = asRows([
+    // 药品：手动顺序是 甲、乙、丙；按到期升序应是 丙、乙、甲
+    { uuid: '1', name: '甲', category: 'medicine', expires_on: '2027-01-01', sort_order: '10' },
+    { uuid: '2', name: '乙', category: 'medicine', expires_on: '2026-06-01', sort_order: '20' },
+    { uuid: '3', name: '丙', category: 'medicine', expires_on: '2026-01-01', sort_order: '30' },
+    // 日用品：手动顺序是 洗衣液、口罩；按名称升序应是 口罩、洗衣液
+    { uuid: '4', name: '洗衣液', category: 'daily', sort_order: '10' },
+    { uuid: '5', name: '口罩', category: 'daily', sort_order: '20' },
+  ]);
+
+  const tree = buildTree(items, {
+    levels: 1,
+    sort: 'manual',
+    perGroup: { medicine: { field: 'expiry', desc: false } },
+    order: {},
+  });
+
+  const med = tree.nodes.find((n) => n.key === 'medicine')!;
+  const daily = tree.nodes.find((n) => n.key === 'daily')!;
+  assert.deepEqual(med.items.map((r) => r['name']), ['丙', '乙', '甲'], '药品按到期升序');
+  assert.deepEqual(
+    daily.items.map((r) => r['name']),
+    ['洗衣液', '口罩'],
+    '日用品没被设过，应保持手动顺序 —— 这正是"互相独立"的意思',
+  );
+});
+
+test('每个分组各自的排序：方向由调用方定，不被字段默认值改掉', () => {
+  const items = asRows([
+    { uuid: '1', name: '甲', category: 'daily', expires_on: '2026-01-01', sort_order: '10' },
+    { uuid: '2', name: '乙', category: 'daily', expires_on: '2027-01-01', sort_order: '20' },
+  ]);
+
+  // 同一个组、同一个字段，只有方向不同 —— 结果必须相反。
+  // 这条是防"界面上点哪个箭头都由字段默认方向说了算"的回归。
+  const up = buildTree(items, {
+    levels: 1,
+    sort: 'manual',
+    perGroup: { daily: { field: 'expiry', desc: false } },
+    order: {},
+  });
+  const down = buildTree(items, {
+    levels: 1,
+    sort: 'manual',
+    perGroup: { daily: { field: 'expiry', desc: true } },
+    order: {},
+  });
+  assert.deepEqual(up.nodes[0]!.items.map((r) => r['name']), ['甲', '乙']);
+  assert.deepEqual(down.nodes[0]!.items.map((r) => r['name']), ['乙', '甲']);
+});
+
+test('每个分组各自的排序：field 为 manual 等于"没设定"，不影响手动顺序', () => {
+  const items = asRows([
+    { uuid: '1', name: '先', category: 'daily', expires_on: '2027-01-01', sort_order: '10' },
+    { uuid: '2', name: '后', category: 'daily', expires_on: '2026-01-01', sort_order: '20' },
+  ]);
+  // 界面上"再点一次同一个箭头"就是清掉这一组 —— 服务端存的是"表里没这个键"，
+  // 但万一存进来一个 manual，也不能把它当成一个排序字段去排。
+  const tree = buildTree(items, {
+    levels: 1,
+    sort: 'manual',
+    perGroup: { daily: { field: 'manual', desc: false } },
+    order: {},
+  });
+  assert.deepEqual(tree.nodes[0]!.items.map((r) => r['name']), ['先', '后']);
+});
+
+test('按分类排序用的是中文名，不是存储用的英文 key', () => {
+  // 存储 key 的字母序是 daily < medicine < supplement，
+  // 中文名的字典序是 保健品 < 日用品 < 药品 —— 两者不同。
+  // 用 key 排的话用户看不出规律（"为什么保健品排在药品后面"）。
+  const items = asRows([
+    { uuid: '1', name: 'a', category: 'medicine', sort_order: '10' },
+    { uuid: '2', name: 'b', category: 'daily', sort_order: '20' },
+    { uuid: '3', name: 'c', category: 'supplement', sort_order: '30' },
+  ]);
+  const sorted = sortItems(items, 'category', false);
+  assert.deepEqual(sorted.map((r) => r['category']), ['supplement', 'daily', 'medicine']);
+});
+
 test('分组顺序存在工作区偏好里，跟着注册表走', () => {
   const root = tmpRoot();
   try {

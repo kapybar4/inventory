@@ -60,6 +60,20 @@ export interface ColumnDef {
   defaultOn: boolean;
   /** 渲染时是否靠右（数字类） */
   align?: 'right';
+  /**
+   * 点这个列头时按哪个排序字段排（`SortField`）。
+   *
+   * 单独一个字段而不是直接用 `key`：列名和排序字段大部分同名，
+   * 但有两处对不上 ——
+   *   - 列 `expiry`（界面叫「到期时间」）实际要按**最紧迫的那条到期来源**排，
+   *     排序字段是 `expiry`，语义比列名窄；
+   *   - 列 `purchased` 的排序语义是「入库日期」，与列名同义但名字不同。
+   * 显式写出来，比在渲染层里维护一张"列 → 字段"的映射表更难漂移：
+   * 那张表加列时会忘（"内部标识生成"就是这么在三个文件里各写了一份的）。
+   *
+   * 不写 = 这一列不可排序（渲染层就不画箭头）。
+   */
+  sortKey?: string;
 }
 
 /**
@@ -82,6 +96,7 @@ export const ITEM_COLUMNS: ColumnDef[] = [
     hint: '物品名称。必须显示 —— 否则不知道到期的是什么东西',
     lock: true,
     defaultOn: true,
+    sortKey: 'name',
   },
   {
     key: 'expiry',
@@ -89,29 +104,52 @@ export const ITEM_COLUMNS: ColumnDef[] = [
     hint: '到期日 + 剩余时间（自动计算，会随日期自己刷新）。必须显示',
     lock: true,
     defaultOn: true,
+    sortKey: 'expiry',
   },
-  { key: 'category', label: '分类', hint: '所属分类，未分类显示为「未分类」', defaultOn: true },
-  { key: 'brand', label: '品牌', hint: '选填字段', defaultOn: true },
-  { key: 'model', label: '型号', hint: '选填字段，与规格不同', defaultOn: true },
-  { key: 'quantity', label: '数量', hint: '批量物品显示「剩余/总数」', defaultOn: true, align: 'right' },
-  { key: 'purchased', label: '入库', hint: '这件东西从什么时候开始算：生产日期 / 购入时间 / 签发日期都填这里', defaultOn: true },
+  {
+    key: 'category',
+    label: '分类',
+    hint: '所属分类，未分类显示为「未分类」',
+    defaultOn: true,
+    sortKey: 'category',
+  },
+  { key: 'brand', label: '品牌', hint: '选填字段', defaultOn: true, sortKey: 'brand' },
+  { key: 'model', label: '型号', hint: '选填字段，与规格不同', defaultOn: true, sortKey: 'model' },
+  {
+    key: 'quantity',
+    label: '数量',
+    hint: '批量物品显示「剩余/总数」',
+    defaultOn: true,
+    align: 'right',
+    sortKey: 'quantity',
+  },
+  {
+    key: 'purchased',
+    label: '入库',
+    hint: '这件东西从什么时候开始算：生产日期 / 购入时间 / 签发日期都填这里',
+    defaultOn: true,
+    sortKey: 'purchased',
+  },
   {
     key: 'location',
     label: '位置',
     hint: '如 客厅药箱-上层。默认收在展开区里 —— 打开这列会明显占宽度',
     defaultOn: false,
+    sortKey: 'location',
   },
   {
     key: 'spec',
     label: '规格',
     hint: '选填字段。默认收在展开区里',
     defaultOn: false,
+    sortKey: 'spec',
   },
   {
     key: 'notes',
     label: '备注',
     hint: '默认收在展开区里。备注通常很长，当列显示会把表撑开',
     defaultOn: false,
+    sortKey: 'notes',
   },
 ];
 

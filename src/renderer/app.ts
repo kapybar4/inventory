@@ -58,6 +58,8 @@ interface ColumnDef {
   lock?: boolean;
   defaultOn: boolean;
   align?: 'right';
+  /** 点这个列头时按哪个排序字段排；不写 = 不可排序（见 core/columns.ts） */
+  sortKey?: string;
 }
 
 interface WsRow {
@@ -113,8 +115,16 @@ interface GroupTreeResult {
   levels: number;
   requestedLevels: number;
   sortedBy: string;
-  /** 排序关闭时才允许拖动 */
+  /**
+   * 拖动是否可用。
+   *
+   * `true` = 没有任何分组被排序（全手动）。**只要有一个分类被点了列头，
+   * 那个分类就不能再拖** —— 拖了也会立刻被排序覆盖，看着像坏了。
+   * 但别的分类不受影响，所以这是整页一个标志、按组判定在渲染层做。
+   */
   dragEnabled: boolean;
+  /** 每个分组各自的排序；表里没有的组 = 手动顺序 */
+  groupSort?: Record<string, { field: string; desc: boolean }>;
   total: number;
   uncategorized: number;
   groups: GroupNode[];
@@ -505,6 +515,14 @@ const state: {
   /** 排序字段；'manual' = 排序关闭，按拖动固定下来的顺序 */
   sortField: string;
   sortFields: SortFieldDef[];
+  /**
+   * **每个分组各自的排序**：`pathKey(path)` → `{ field, desc }`。
+   *
+   * 与 `sortField` 的分工：那个是"一个字段排全部"（命令行与概览页仍用它），
+   * 这个是分组页的"每个分类各自排各自的"。
+   * **表里没有的组 = 手动顺序**（可拖动），所以"一个都没点过"就等于全手动。
+   */
+  groupSort: Record<string, { field: string; desc: boolean }>;
   /** 展开到第几级（1~3，一级不可关） */
   /** 收起的分组路径 */
   collapsed: Set<string>;
@@ -559,6 +577,15 @@ const state: {
   groupTree: null,
   sortField: 'manual',
   sortFields: [],
+  /*
+   * **每个分组各自的排序**：`pathKey(path)` → `{ field, desc }`。
+   *
+   * 与 `sortField` 的分工：那个是"一个字段排全部"（命令行与概览页仍用它），
+   * 这个是分组页的"每个分类各自排各自的"。
+   * **表里没有的组 = 手动顺序**，所以"一个都没点过"就等于全手动可拖动，
+   * 不用再存一个"排序关闭"的标志。
+   */
+  groupSort: {} as Record<string, { field: string; desc: boolean }>,
   collapsed: new Set<string>(),
   groupOnlyExpired: false,
   categoryFilter: '',
@@ -584,8 +611,7 @@ function flattenTree(nodes: GroupNode[]): ItemRow[] {
   return out;
 }
 
-/** 分组路径的字符串键：拖动顺序与收起状态都按它存 */
-const pathKey = (path: string[]): string => path.join('\u0001');
+/** 分组路径的字符串键：拖动顺序与收起状态都按它存（实现见下面的 pathKey） */
 
 // ─── 小工具 ───
 
@@ -1040,6 +1066,13 @@ async function loadGroupTree(): Promise<void> {
     sort: state.sortField,
   });
   state.sortField = state.groupTree.sortedBy;
+  /*
+   * 每个分组各自的排序，以服务端返回的为准。
+   *
+   * 服务端会把 `field === 'manual'` 的项剔掉（manual 等于"没设定"，
+   * 靠"表里没有"表达），所以这里拿到的就是"设过的那些组"。
+   */
+  state.groupSort = (state.groupTree.groupSort as typeof state.groupSort) ?? {};
   state.collapsed = new Set(state.groupTree.collapsed);
   // 分组接口顺带把列配置带回来了，省一次往返
   if (Array.isArray(state.groupTree.columns)) state.columnVisible = state.groupTree.columns;
@@ -1156,6 +1189,7 @@ async function savePrefs(patch: {
   order?: Record<string, string[]>;
   levels?: number;
   sort?: string;
+  groupSort?: Record<string, { field: string; desc: boolean }>;
   collapsed?: string[];
   columns?: string[];
 }): Promise<void> {
@@ -1650,12 +1684,19 @@ function renderGroups(view: HTMLElement): void {
   view.append(
     viewHead(
       '分组',
-      el('span', {
-        class: 'muted small',
-        text: state.sortField === 'manual'
-          ? '排序已关闭：物品按你拖动固定下来的顺序排列，可以继续拖'
-          : '排序已开启：物品按字段排列，拖动已禁用；关掉排序就回到你手工摆的顺序',
-      }),
+      /*
+       * 说明挪进悬停提示（和工作区页同一条规则）。
+       *
+       * 原来的文案是"排序已关闭/已开启……"，那是**一个全局排序开关**时代的话；
+       * 现在排序是每列、每分类各自的事，常驻一句"排序已关闭"既不对也不再有用。
+       * 改成讲清楚"怎么排、怎么恢复拖动"，需要时悬停即得。
+       */
+      hoverTip(
+        '点列头旁边的 ▲ / ▼ 按那一列排序；再点一次同一个箭头回到手动顺序。\n' +
+          '每个分类各自独立 —— 一个分类排了序，不会动到别的分类。\n' +
+          '被排序的分类不能拖动行首手柄（拖了也会被排序覆盖）；' +
+          '没排序的分类照旧可以拖。',
+      ),
     ),
   );
 
@@ -1693,68 +1734,23 @@ function renderGroups(view: HTMLElement): void {
     : tree.groups;
 
   /*
-   * 分类筛选放最前面：它是这一页最常动的东西（"只看药品"），
-   * 而且分组页的第一个决策就是"看哪一组"。原来它夹在排序和按钮之间，
-   * 想看药品得先在一堆控件里找它。
+   * 工具栏只剩两样：右边的「只看已过期」和「全部收起」。
+   *
+   * ── 去掉了分类筛选下拉 ──
+   * 它和分组标题是**同一份信息的两遍**：这一页本来就一个分类一组、
+   * 组标题上写着组名和件数，想只看药品直接对那一组做就是了。
+   * 下拉只是把同一批东西"藏掉一部分"，却要多点一次、还要多点一次切回来。
+   *
+   * ── 去掉了排序开关 + 字段下拉 ──
+   * 换成点列头排序（见 `sortableTh`）。原来那套有两个说不清的地方：
+   *   1. "排序"开关和"字段"下拉互相牵制 —— 关掉开关时下拉还杵在那儿
+   *      （虽然禁用了），看起来像坏了；
+   *   2. 一个字段排全部分类。想知道"药品里最近到期的"就得把日用品
+   *      也一起重排，而用户根本没想动后者。
+   * 现在每个分类各排各的，方向由点哪个箭头直接决定。
    */
-  if (tree.groups.length > 1) {
-    const catSel = select(
-      'groupCat',
-      [{ value: '', label: '全部分类' }, ...tree.groups.map((g) => ({ value: g.key, label: `${g.label}（${g.count}）` }))],
-      state.categoryFilter,
-    );
-    catSel.addEventListener('change', () => {
-      state.categoryFilter = catSel.value;
-      render();
-    });
-    bar.append(catSel);
-  }
 
-  // 排序：开关 + 字段。关掉字段下拉时它本来就不起作用，留着只会让人多点一次
-  const sortOn = el('input', { type: 'checkbox', class: 'mini-check' }) as HTMLInputElement;
-  sortOn.checked = state.sortField !== 'manual';
-  const sortOnBox = el('label', { class: 'check mini' });
-  sortOnBox.append(sortOn, el('span', { text: '排序' }));
-  sortOnBox.title = '开启后按字段排序，物品不可拖动；关闭则回到你拖动固定的顺序';
-  bar.append(sortOnBox);
-
-  const sortWrap = el('span', { class: 'sort-field' });
-  const sortSel = select(
-    'sortField',
-    state.sortFields.map((f) => ({ value: f.key, label: f.label })),
-    state.sortField,
-  );
-  const manual = state.sortField === 'manual';
-  sortSel.disabled = manual;
-  const applySort = (field: string): void => {
-    state.sortField = field;
-    void savePrefs({ sort: field });
-    void loadGroupTree().then(render);
-  };
-  sortOn.addEventListener('change', () => applySort(sortOn.checked ? 'expiry' : 'manual'));
-  sortSel.addEventListener('change', () => applySort(sortSel.value));
-
-  if (manual) {
-    /*
-     * 手动顺序下不给一个禁用的下拉 —— 那看起来像"坏掉了"。
-     * 换成一句说明当前状态的话，并把它自己当 tooltip 的载体：
-     * 怎么拖、拖哪里，悬停即得，不常驻占地方。
-     */
-    const manualHint = el('span', { class: 'muted small', text: '拖动行首手柄调整顺序' });
-    manualHint.title = '排序关闭时按你拖动固定下来的顺序排列，可以继续拖';
-    sortWrap.append(manualHint);
-  } else {
-    sortWrap.append(sortSel);
-    const def = state.sortFields.find((f) => f.key === state.sortField);
-    if (def) {
-      const hint = el('span', { class: 'muted small', text: def.hint });
-      hint.title = def.hint;
-      sortWrap.append(hint);
-    }
-  }
-  bar.append(sortWrap);
-
-  // 弹性空隙：把"筛选与排序"和"视图动作"分成两拨，右边那组贴右
+  // 弹性空隙：把左边（留白）和右边这组视图动作分开，右边贴右
   bar.append(el('span', { class: 'tb-gap' }));
 
   const onlyExpired = el('label', { class: 'check mini' });
@@ -1972,6 +1968,117 @@ function toggleCollapse(key: string, sec: HTMLElement | null): void {
 }
 
 /**
+ * 设置某一个分组的排序。
+ *
+ * **只动这一个分类**，别的分类原样保留 —— 需求就是"所有分类在排序上互相独立"。
+ * 所以这里改的是 `state.groupSort` 里的一个键，不是整页一个 `sortField`。
+ *
+ * `desc` 传 `null` 表示"清掉这一组的排序，回到手动顺序"：
+ * 表里删掉这个键就等于没设定过，`buildTree` 会退回 `opts.sort`
+ * （这里是 `manual`），于是拖动又可用。
+ *
+ * 存整份表（不是增量）：服务端那边也是整份替换，因为"删除"这件事
+ * 用合并式更新表达不出来，会留下一个永远清不掉的旧设定。
+ */
+function setGroupSort(pathKey: string, field: string, desc: boolean | null): void {
+  const next = { ...state.groupSort };
+  if (desc === null || field === 'manual') delete next[pathKey];
+  else next[pathKey] = { field, desc };
+  state.groupSort = next;
+
+  /*
+   * 顺手把全局 `sortField` 也切到 `manual`。
+   *
+   * 两个排序来源同时活着的话，`buildTree` 里没被单独设定的组还会按
+   * 全局字段排 —— 那样"清掉某一列的排序"就回到的是**上一个全局字段**，
+   * 而不是手动顺序，跟按钮上写的对不上。
+   * 全局那份留给命令行与概览页用，界面上既然改成了按列点，就让它退场。
+   */
+  if (state.sortField !== 'manual') {
+    state.sortField = 'manual';
+    void savePrefs({ sort: 'manual', groupSort: next });
+  } else {
+    void savePrefs({ groupSort: next });
+  }
+  void loadGroupTree().then(render);
+}
+
+/**
+ * 可排序的列头：文案 + 两个箭头（升序 / 降序）。
+ *
+ * ── 为什么是两个箭头，不是一个可点的标题 ──
+ * "点一下切换方向"读起来简单，但它有个说不清的状态：**第一次点是从升序开始
+ * 还是降序？** 只能靠一个隐藏的规则（"这个字段默认降序"）决定，
+ * 而用户看不到那条规则。两个箭头把"点哪个就是哪个"写在脸上，
+ * 而且当前方向高亮哪一支一目了然 —— 不用去猜"现在是升是降"。
+ *
+ * 当前已排在这一列时，点**同一个箭头**清掉排序、回到手动顺序（即恢复可拖动）。
+ * 这条写在标题的悬停提示里。
+ */
+function sortableTh(
+  label: string,
+  sortKey: string | undefined,
+  groupKey: string,
+  align: 'right' | undefined,
+  hint: string,
+): HTMLElement {
+  const cls = [align === 'right' ? 'right' : '', 'sortable'].filter(Boolean).join(' ');
+  const th = el('th', { class: cls });
+
+  // 没有排序字段的列（以后可能加）也画出标题，只是不带箭头
+  if (!sortKey) {
+    th.append(el('span', { class: 'th-label', text: label }));
+    return th;
+  }
+
+  const cur = state.groupSort[groupKey];
+  const active = cur && cur.field === sortKey ? cur : null;
+  const def = state.sortFields.find((f) => f.key === sortKey);
+  const fieldLabel = def?.label ?? label;
+
+  const make = (desc: boolean, glyph: string): HTMLElement => {
+    const on = active?.desc === desc;
+    const b = el('button', {
+      class: `th-sort${on ? ' on' : ''}`,
+      type: 'button',
+      text: glyph,
+    });
+    b.title = on
+      ? `取消排序，回到手动顺序（可以拖动）`
+      : `按${fieldLabel}${desc ? '降序' : '升序'}排`;
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      setGroupSort(groupKey, sortKey, on ? null : desc);
+    });
+    return b;
+  };
+
+  th.append(el('span', { class: 'th-label', text: label }));
+  const arrows = el('span', { class: 'th-arrows' });
+  arrows.append(make(false, '▲'), make(true, '▼'));
+  th.append(arrows);
+  // 列本身的说明（原来靠 title 挂在 th 上）现在并进这一列的提示里
+  th.title = hint;
+  return th;
+}
+
+/**
+ * 取某一列的说明文字（来自 core 的列定义）。
+ *
+ * 列说明原本挂在 `th` 的 `title` 上，现在那个位置被"点箭头排序"的说明占了，
+ * 所以并进 `sortableTh` 传进去的那个提示里 —— 一个列头只留一条提示，
+ * 不要出现"悬停看到哪条取决于鼠标落在标题上还是箭头上"这种事。
+ */
+function hintForCol(key: string): string {
+  const def = state.columnAvailable.find((c) => c.key === key);
+  const parts: string[] = [];
+  if (def?.hint) parts.push(def.hint);
+  const col = visibleItemCols(state.columnVisible).find((c) => c.key === key);
+  if (col?.sortKey) parts.push('点 ▲ / ▼ 按这一列排序；再点一次同一个箭头回到手动顺序。');
+  return parts.join('\n');
+}
+
+/**
  * 按 key 找组的 section。
  *
  * key 可能是**空字符串**（未分类那一组），所以不能用属性选择器
@@ -1986,13 +2093,32 @@ function findGroupSection(key: string): HTMLElement | null {
 }
 
 /**
+ * 折叠状态用的路径键。
+ *
+ * 与 core 的 `groupPathKey()` **必须同拼法** —— 界面存的时候和 core 查的时候
+ * 各拼一次，拼法一旦不同就是"存了但读不到"，而且不报错、只是设定不生效。
+ * 渲染层 import 不到 core，所以这里只能再写一份；改一处要记得另一处。
+ */
+function pathKey(path: readonly string[]): string {
+  return path.join('\u0001');
+}
+
+/**
  * 组内物品表。
  *
  * 排序关闭时每行前面有拖动手柄；开启排序时手柄消失 ——
  * 让「现在能不能拖」这件事从界面上直接看得出来，而不是拖了没反应。
  */
 function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
-  const draggable = state.sortField === 'manual';
+  const groupKey = pathKey(node.path);
+  /*
+   * 拖动是否可用：**看这一组自己有没有被排序**，不是看整页。
+   *
+   * 需求是"一旦主动点击按某一列排列之后就不允许拖拽" —— 那个"之后"是
+   * 指**这个分类**。整页一刀切会在"药品按到期排、日用品保持手动"时
+   * 把日用品的拖动也封掉，而用户要的是两者互不影响。
+   */
+  const draggable = !state.groupSort[groupKey];
   const cols = visibleItemCols(state.columnVisible);
 
   const t = el('table', { class: 'items group-items' });
@@ -2001,7 +2127,7 @@ function groupItemsTable(items: ItemRow[], node: GroupNode): HTMLElement {
   head.append(el('th', { class: 'col-extra', text: '' }));
   head.append(el('th', { class: 'seq right', text: '#' }));
   for (const c of cols) {
-    head.append(el('th', { class: c.align === 'right' ? 'right' : '', text: c.head }));
+    head.append(sortableTh(c.head, c.sortKey, groupKey, c.align, hintForCol(c.key)));
   }
   // 操作列：值是 `.ops`（右对齐），表头也跟着右对齐（见 restockTable 上的说明）
   head.append(el('th', { class: 'right', text: '' }));
@@ -2503,6 +2629,15 @@ interface ItemCol {
   /** 单元格的 class */
   cls?: string;
   align?: 'right';
+  /**
+   * 点这个列头时按哪个排序字段排。
+   *
+   * 值是 core `SortField` 里的一个 —— 渲染层 import 不到 core，
+   * 所以这里只是个字符串，真正认它的是 `buildTree`。
+   * 名字与 `key` 大多相同，但**刻意分开写**：`sortKey` 说的是"按什么排"，
+   * `key` 说的是"这列画什么"，两者不必一致。
+   */
+  sortKey?: string;
 }
 
 interface ColCtx {
@@ -2516,6 +2651,7 @@ function itemCols(): ItemCol[] {
     {
       key: 'name',
       head: '物品',
+      sortKey: 'name',
       cell: (it, ctx) => {
         const cell = el('td');
         const link = el('a', { class: 'link', text: it.name });
@@ -2530,6 +2666,7 @@ function itemCols(): ItemCol[] {
     {
       key: 'expiry',
       head: '到期时间',
+      sortKey: 'expiry',
       cell: (it, ctx) => {
         // 到期日 + 剩余时间放同一格：两者是同一件事的两种说法，
         // 拆成两列会让「可配置」多出一个没有意义的中间状态
@@ -2571,20 +2708,23 @@ function itemCols(): ItemCol[] {
     {
       key: 'category',
       head: '分类',
+      sortKey: 'category',
       cls: 'muted',
       cell: (it) => td(enumLabel('item_category', it.category) || '未分类', 'muted'),
     },
-    { key: 'brand', head: '品牌', cell: (it) => td(it.brand ?? '', 'muted') },
-    { key: 'model', head: '型号', cell: (it) => td(it.model ?? '', 'muted mono') },
+    { key: 'brand', head: '品牌', sortKey: 'brand', cell: (it) => td(it.brand ?? '', 'muted') },
+    { key: 'model', head: '型号', sortKey: 'model', cell: (it) => td(it.model ?? '', 'muted mono') },
     {
       key: 'location',
       head: '位置',
+      sortKey: 'location',
       cell: (it) => td(it.container ?? '', 'muted'),
     },
     {
       key: 'quantity',
       head: '数量',
       align: 'right',
+      sortKey: 'quantity',
       cell: (it, ctx) => {
         const cell = el('td', { class: 'right' });
         if (ctx.bulk) {
@@ -2611,9 +2751,9 @@ function itemCols(): ItemCol[] {
         return cell;
       },
     },
-    { key: 'purchased', head: '入库', cell: (it) => td(it.purchased_on ?? '', 'muted mono') },
-    { key: 'spec', head: '规格', cell: (it) => td(it.spec ?? '', 'muted') },
-    { key: 'notes', head: '备注', cell: (it) => td(it.notes ?? '', 'muted wrap') },
+    { key: 'purchased', head: '入库', sortKey: 'purchased', cell: (it) => td(it.purchased_on ?? '', 'muted mono') },
+    { key: 'spec', head: '规格', sortKey: 'spec', cell: (it) => td(it.spec ?? '', 'muted') },
+    { key: 'notes', head: '备注', sortKey: 'notes', cell: (it) => td(it.notes ?? '', 'muted wrap') },
   ];
 }
 

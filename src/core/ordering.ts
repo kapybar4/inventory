@@ -29,6 +29,17 @@ export const UNCATEGORIZED_LABEL = '未分类';
 export const NO_SUBCATEGORY = '';
 export const NO_TAG = '';
 
+/**
+ * 把一条分组路径拼成查表用的键。
+ *
+ * `groupOrder` / `perGroup` 都用它当键，所以**必须只有一处实现** ——
+ * 界面存的时候和 core 查的时候各拼一次，拼法一旦不同就是"存了但读不到"，
+ * 而且不报错，只是设定不生效。
+ */
+export function groupPathKey(path: readonly string[]): string {
+  return path.join('\u0001');
+}
+
 // ─────────────────────────────────────────────────────────────
 // 排序
 // ─────────────────────────────────────────────────────────────
@@ -37,10 +48,15 @@ export type SortField =
   | 'manual'
   | 'expiry'
   | 'name'
-  | 'purchased'
+  | 'category'
+  | 'brand'
+  | 'model'
   | 'quantity'
   | 'remaining'
+  | 'purchased'
   | 'location'
+  | 'spec'
+  | 'notes'
   | 'price'
   | 'created';
 
@@ -56,10 +72,15 @@ export const SORT_FIELDS: SortFieldDef[] = [
   { key: 'manual', label: '手动顺序', desc: false, hint: '按你拖动固定下来的顺序' },
   { key: 'expiry', label: '到期时间', desc: false, hint: '最先到期的排最前，长期在最后' },
   { key: 'name', label: '名称', desc: false, hint: '按拼音/笔画排' },
+  { key: 'category', label: '分类', desc: false, hint: '按分类的中文名排' },
+  { key: 'brand', label: '品牌', desc: false, hint: '按品牌名排' },
+  { key: 'model', label: '型号', desc: false, hint: '按型号排' },
   { key: 'purchased', label: '入库日期', desc: true, hint: '最近入库的排最前' },
   { key: 'quantity', label: '数量', desc: true, hint: '数量多的排最前' },
   { key: 'remaining', label: '剩余', desc: true, hint: '剩得多的排最前' },
   { key: 'location', label: '位置', desc: false, hint: '按房间 + 柜格排' },
+  { key: 'spec', label: '规格', desc: false, hint: '按规格排' },
+  { key: 'notes', label: '备注', desc: false, hint: '按备注排' },
   { key: 'price', label: '价格', desc: true, hint: '贵的排最前' },
   { key: 'created', label: '添加时间', desc: true, hint: '最近添加的排最前' },
 ];
@@ -71,39 +92,65 @@ export function sortFieldDef(field: SortField): SortFieldDef {
 /** 没有到期日的物品排在所有有到期日之后 */
 const FAR_FUTURE = '9999-12-31';
 
-/** 按选定字段给组内物品排序（纯函数，不改原数组） */
-export function sortItems(items: Row[], field: SortField): Row[] {
+/** 一个组的排序状态：按哪个字段、哪个方向 */
+export interface GroupSort {
+  field: SortField;
+  /** true = 降序 */
+  desc: boolean;
+}
+
+/** 取字段的排序键 */
+function sortKeyOf(r: Row, field: SortField): string | number {
+  switch (field) {
+    case 'expiry':
+      return r['expires_on'] ? String(r['expires_on']) : FAR_FUTURE;
+    case 'name':
+      return String(r['name'] ?? '');
+    case 'category':
+      // 按**中文名**排，不按 key —— 否则「药品」和「日用品」的先后
+      // 取决于英文 key 的字母序，用户看不出规律
+      return categoryLabel(String(r['category'] ?? ''));
+    case 'brand':
+      return String(r['brand'] ?? '');
+    case 'model':
+      return String(r['model'] ?? '');
+    case 'quantity':
+      return Number(r['quantity'] ?? 0);
+    case 'remaining':
+      return Number(r['remaining'] ?? 0);
+    case 'purchased':
+      return r['purchased_on'] ? String(r['purchased_on']) : '';
+    case 'location':
+      return String(r['container'] ?? '');
+    case 'spec':
+      return String(r['spec'] ?? '');
+    case 'notes':
+      return String(r['notes'] ?? '');
+    case 'price':
+      return Number(r['unit_price_cents'] ?? 0);
+    case 'created':
+      return String(r['created_at'] ?? '');
+    default:
+      return '';
+  }
+}
+
+/**
+ * 给一组物品排序。
+ *
+ * `dir` 省略时用字段定义的默认方向（`SortFieldDef.desc`）；
+ * 传了就**以传进来的为准** —— 界面上每列都有"升序 / 降序"两个箭头，
+ * 点哪个就该是哪个，不能被"这个字段默认降序"改掉。
+ */
+export function sortItems(items: Row[], field: SortField, dir?: boolean): Row[] {
   if (field === 'manual') return [...items].sort(byManual);
 
-  const def = sortFieldDef(field);
-  const sign = def.desc ? -1 : 1;
-
-  const key = (r: Row): string | number => {
-    switch (field) {
-      case 'expiry':
-        return r['expires_on'] ? String(r['expires_on']) : FAR_FUTURE;
-      case 'name':
-        return String(r['name'] ?? '');
-      case 'purchased':
-        return r['purchased_on'] ? String(r['purchased_on']) : '';
-      case 'quantity':
-        return Number(r['quantity'] ?? 0);
-      case 'remaining':
-        return Number(r['remaining'] ?? 0);
-      case 'location':
-        return String(r['container'] ?? '');
-      case 'price':
-        return Number(r['unit_price_cents'] ?? 0);
-      case 'created':
-        return String(r['created_at'] ?? '');
-      default:
-        return '';
-    }
-  };
+  const desc = dir ?? sortFieldDef(field).desc;
+  const sign = desc ? -1 : 1;
 
   return [...items].sort((a, b) => {
-    const ka = key(a);
-    const kb = key(b);
+    const ka = sortKeyOf(a, field);
+    const kb = sortKeyOf(b, field);
     let d: number;
     if (typeof ka === 'number' && typeof kb === 'number') d = ka - kb;
     else d = String(ka).localeCompare(String(kb), 'zh');
@@ -213,8 +260,24 @@ function firstLevelRank(key: string): number {
 export interface GroupOptions {
   /** 展开到第几级，1~3 */
   levels: number;
-  /** 排序字段；'manual' 表示手动顺序 */
+  /**
+   * 全局排序字段（兜底）。
+   *
+   * `perGroup` 里有这个组就听它的，否则用这里 —— 保留它是因为
+   * 命令行 `group list --sort` 与概览页仍然按"一个字段排全部"工作，
+   * 而界面上的分组页改成了**每个分类各自独立**（见 `perGroup`）。
+   */
   sort: SortField;
+  /**
+   * 每个组各自的排序：`path.join('\u0001')` → 字段 + 方向。
+   *
+   * 键的拼法与 `order` 一致，都是完整路径 —— 分组固定一级之后路径就是一个
+   * 分类 key，但用路径拼法可以让以后重新开放多级分组时不用改这里。
+   *
+   * **没在这个表里的组 = 手动顺序**（可拖动）。所以"界面上没点过任何列头"
+   * 就等于全手动，与旧行为一致。
+   */
+  perGroup?: Record<string, GroupSort>;
   /** 每个父路径下的自定义组顺序：path.join('\u0001') → 有序 key 列表 */
   order: Record<string, string[]>;
   /**
@@ -320,7 +383,16 @@ export function buildTree(items: Row[], opts: GroupOptions): GroupTree {
     );
 
     // 叶子组才有直接物品；有子节点时物品都在子树里
-    const ownItems = draft.children.size > 0 ? [] : sortItems(draft.items, opts.sort);
+    //
+    // 排序按**这一组自己的设定**（`perGroup`），没设定就退回全局的 `opts.sort`。
+    // 界面上的分组页因此可以做到"每个分类各自排各自的"。
+    const mine = opts.perGroup?.[pathKey];
+    const ownItems =
+      draft.children.size > 0
+        ? []
+        : mine && mine.field !== 'manual'
+          ? sortItems(draft.items, mine.field, mine.desc)
+          : sortItems(draft.items, opts.sort);
 
     let count = ownItems.length;
     let expired = 0;

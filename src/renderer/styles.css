@@ -1626,6 +1626,71 @@ td.seq {
   margin: 0;
 }
 
+/* ───────────────────── 可排序的列头 ───────────────────── */
+
+/*
+ * 列头 = 文案 + 两个箭头（升序 / 降序）。
+ *
+ * ── 为什么是两个箭头，不是一个可点的标题 ──
+ * "点标题切换方向"读起来简单，但它有个说不清的状态：**第一次点是从升序
+ * 开始还是降序？** 只能靠一条用户看不见的规则（"这个字段默认降序"）决定。
+ * 两个箭头把"点哪个就是哪个"写在脸上。
+ *
+ * 箭头默认**很淡**（不然每一列都挂两个三角，表头会变吵），
+ * 悬停这一列或已经排在这一列时才浮出来。
+ */
+th.sortable {
+  white-space: nowrap;
+}
+
+th.sortable .th-label {
+  /* 让文案与箭头之间不留空隙地贴着，箭头才能紧跟在文字右边 */
+  vertical-align: middle;
+}
+
+.th-arrows {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0;
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+.th-sort {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--fg-faint);
+  font-size: 7px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+
+/* 悬停这一列时两个箭头浮出来；已排在这一列时它常驻 */
+th.sortable:hover .th-sort,
+.th-sort.on {
+  opacity: 0.75;
+}
+
+.th-sort:hover {
+  opacity: 1;
+  color: var(--fg);
+}
+
+/* 当前生效的那一支：实心、高亮，一眼看出是升还是降 */
+.th-sort.on {
+  color: var(--accent);
+  opacity: 1;
+}
+
+th.sortable.right .th-arrows {
+  margin-left: 0;
+  margin-right: 4px;
+  order: -1;
+}
+
 h3 {
   display: flex;
   align-items: center;

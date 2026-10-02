@@ -57,6 +57,7 @@ import {
   SORT_FIELDS,
   UNCATEGORIZED,
   type SortField,
+  type GroupSort,
 } from '../core/ordering';
 import {
   DEFAULT_COLUMNS,
@@ -953,6 +954,24 @@ function registerHandlers(): void {
       // 分组层级与排序字段：界面传优先，否则用工作区里存的偏好
       const levels = Number(o['levels'] ?? entry.groupLevels ?? 1);
       const sortField = String(o['sort'] ?? entry.sortField ?? 'manual') as SortField;
+      /*
+       * 每个分组各自的排序：界面传优先，否则用工作区里存的。
+       *
+       * 界面传整份表（不是增量）—— 见 `group:prefs` 里那段说明。
+       */
+      const rawPerGroup = (o['groupSort'] ?? entry.groupSort) as
+        | Record<string, { field?: unknown; desc?: unknown }>
+        | undefined;
+      const groupSort: Record<string, GroupSort> = {};
+      if (rawPerGroup && typeof rawPerGroup === 'object') {
+        for (const [path, v] of Object.entries(rawPerGroup)) {
+          if (!v || typeof v !== 'object') continue;
+          const field = String(v.field ?? 'manual') as SortField;
+          // 'manual' 不参与 —— 它等于"这一组没设定"，靠"表里没有"表达
+          if (field === 'manual') continue;
+          groupSort[path] = { field, desc: v.desc === true };
+        }
+      }
 
       /**
        * 把原始数据库行补成界面能直接渲染的物品对象。
@@ -968,6 +987,7 @@ function registerHandlers(): void {
       const tree = buildTree(rows, {
         levels,
         sort: sortField,
+        perGroup: groupSort,
         order: entry.groupOrder ?? {},
         now: new Date(),
       });
@@ -993,7 +1013,16 @@ function registerHandlers(): void {
         levels: tree.maxLevel,
         requestedLevels: Math.max(1, Math.min(3, levels)),
         sortedBy: sortField,
-        dragEnabled: sortField === 'manual',
+        /*
+         * 拖动是否可用：**只要还有一个组没被排序，就仍然可以拖**。
+         *
+         * 按需求"一旦主动点击按某一列排列之后就不允许拖拽"——
+         * 那个"之后"是**那一个分类**之后。整页一刀切会在
+         * "药品按到期排、日用品保持手动"时把日用品的拖动也封掉，
+         * 而用户的意思是两者互不影响。
+         */
+        dragEnabled: Object.keys(groupSort).length === 0 && sortField === 'manual',
+        groupSort,
         total: tree.total,
         uncategorized: uncategorizedCount(rows),
         groups: tree.nodes.map(decorateNode),
@@ -1136,6 +1165,23 @@ function registerHandlers(): void {
     }
     if (input['levels'] !== undefined) next.groupLevels = Number(input['levels']);
     if (input['sort'] !== undefined) next.sortField = String(input['sort']);
+    /*
+     * 每个分组各自的排序。
+     *
+     * 传整份表（不是增量合并）：界面上"清掉某一列的排序"就是把这个键删掉，
+     * 合并式更新没法表达"删除"，会留下一个永远清不掉的旧设定。
+     */
+    if (input['groupSort'] !== undefined && typeof input['groupSort'] === 'object' && input['groupSort'] !== null) {
+      const table: Record<string, { field: string; desc: boolean }> = {};
+      for (const [path, v] of Object.entries(input['groupSort'] as Record<string, unknown>)) {
+        if (!v || typeof v !== 'object') continue;
+        const field = String((v as Record<string, unknown>)['field'] ?? 'manual');
+        // 'manual' 不存 —— 它等于"这一组没设定"，靠"表里没有"表达就够了
+        if (field === 'manual') continue;
+        table[path] = { field, desc: (v as Record<string, unknown>)['desc'] === true };
+      }
+      next.groupSort = table;
+    }
     if (Array.isArray(input['collapsed'])) next.collapsed = input['collapsed'].map((c) => String(c));
 
     const updated = updateWorkspacePrefs(dd, entry.id, next);
@@ -1144,6 +1190,7 @@ function registerHandlers(): void {
       groupOrder: updated.groupOrder ?? {},
       groupLevels: updated.groupLevels ?? 1,
       sortField: updated.sortField ?? 'manual',
+      groupSort: updated.groupSort ?? {},
       collapsed: updated.collapsed ?? [],
     };
   });

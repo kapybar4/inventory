@@ -227,28 +227,37 @@ dsh-inv alert list --json | jq '.data.counts'
 
 | | 是什么 | 怎么改 |
 | --- | --- | --- |
-| **分组** | 分类 → 子类 → 标签，最多**三级** | 层级按钮 1 / 2 / 3。**一级默认开启且不可关闭** |
-| **排序** | 组内物品按哪个字段排 | 「开启排序」开关 + 字段下拉。**默认关闭** |
-| **手动顺序** | 默认状态下你拖动固定下来的顺序 | 拖物品行（排序关闭时才可拖） |
+| **分组** | 固定按**分类**一级 | 没有层级按钮了，就是"一个分类一组" |
+| **排序** | 组内物品按哪一列排 | **点列头旁边的 ▲ / ▼**。默认不排（= 手动顺序） |
+| **手动顺序** | 没排序时你拖动固定下来的顺序 | 拖物品行（**那一组没被排序**时才可拖） |
 
 三条的相互关系：
 
+- **排序是"每个分类各自的事"**。药品按到期排、日用品按名称排可以同时成立，
+  互不影响；没被点过的分类照旧是手动顺序
 - **排序只影响组内物品的顺序**。它不改分组、不改组之间的顺序，
-  也不动 `sort_order` —— 所以关掉排序就**原样回到**你手工摆好的样子
-- **开启排序时拖动被禁用**，手柄直接从界面上消失。拖了也会被立刻覆盖，
+  也不动 `sort_order` —— 所以取消排序就**原样回到**你手工摆好的样子
+- **被排序的那一组拖动被禁用**，手柄直接从界面上消失。拖了也会被立刻覆盖，
   留着能拖的状态只会让人以为坏了
 - **组顺序按层各自独立**：每一级都能拖，拖动结果存在工作区注册表里
 
-排序字段（`dsh-inv sort fields` 也能列）：
+怎么取消某一组的排序：**再点一次同一个箭头**。它回到手动顺序，拖动也回来。
 
-| 字段 | 方向 | 说明 |
+排序字段（`dsh-inv sort fields` 也能列）。
+**箭头点哪个方向就是哪个方向** —— 下表的"默认方向"只是命令行
+`--sort` 不写 `--desc` 时的取值，界面上不受它限制：
+
+| 字段 | 默认方向 | 说明 |
 | --- | --- | --- |
 | `manual` | — | 默认。按你拖动固定下来的顺序 |
 | `expiry` | 升序 | 最先到期的排最前，长期在最后 |
 | `name` | 升序 | |
-| `purchased` | 降序 | 最近买的排最前 |
+| `category` | 升序 | 按分类的**中文名**排，不是存储用的英文 key |
+| `brand` / `model` | 升序 | |
+| `purchased` | 降序 | 最近入库的排最前 |
 | `quantity` / `remaining` | 降序 | 数量多的排最前 |
 | `location` | 升序 | 房间 + 柜格 |
+| `spec` / `notes` | 升序 | |
 | `price` | 降序 | 贵的排最前 |
 | `created` | 降序 | 最近添加的排最前 |
 
@@ -281,10 +290,17 @@ dsh-inv alert list --json | jq '.data.counts'
 ```bash
 dsh-inv item reorder 护照                 # 移到最前
 dsh-inv item reorder 雨伞 --after 布洛芬  # 插到某条之后
-dsh-inv group list --levels 3             # 三级分组
-dsh-inv group list --sort expiry          # 组内按到期时间
+dsh-inv group list                       # 界面上的样子：按分类一级
+dsh-inv group list --levels 3            # 命令行仍可要到三级（分类 > 子类 > 标签）
+dsh-inv group list --sort expiry         # 组内按到期时间
 dsh-inv group list --order '=daily,medicine'   # 固定第一层的组顺序（会存下来）
 ```
+
+> 界面上的分组固定一级（只按分类）。`--levels` 是给命令行与脚本用的 ——
+> 二级、三级看着是"更细的视角"，实际只是把同一批东西拆成更多更小的组，
+> 每组两三行，翻起来更累；标签尤其糟，一个物品有多个标签就会出现在多个组里，
+> 同一个东西重复出现让人怀疑是不是记了两遍。
+> 分类、子类、标签这三个**字段都还在**（导出、搜索、筛选照样用）。
 
 ### 表格列可以自己配，但两列关不掉
 
@@ -412,7 +428,7 @@ dsh-inv item add --name 空调 -c digital --extra '{"滤网型号":"M8R-FLP"}'
 
 ### 时间轴
 
-把「到期」这件事放到横向时间上看：横轴是按粒度（日 / 周 / 月 / 年）切好的时间格，
+把「到期」这件事放到横向时间上看：横轴是**按天**切好的时间格，
 每行一件物品，到期日落在哪一格就画在哪一格。
 
 - 可以横向拉动；切到这一页时会自动滚到「今天」那一格并居中
@@ -420,8 +436,14 @@ dsh-inv item add --name 空调 -c digital --extra '{"滤网型号":"M8R-FLP"}'
 - 支持**按分类筛选**，只看某一类
 - 长期物品不占时间格，单独一行
 
+**范围和粒度都是固定的**：按天分格，覆盖「上周一 ~ 下下周日」共 4 周 28 天。
+起点取上周一而不是"今天减 7 天"，这样横轴从整周开始、四周边界落在周一/周日上。
+所以**没有 `--granularity` / `--past` / `--future`** —— 界面与命令行共用
+`core/timeline.ts` 里那一份 `buildTimelineSlots()`。早先两边各写了一遍，
+结果界面按天、命令行按月，改一处另一处不动。
+
 ```bash
-dsh-inv timeline --granularity month --category medicine
+dsh-inv timeline --category medicine
 dsh-inv group list --sort expiry
 ```
 
@@ -578,7 +600,7 @@ dsh-inv init [--name 名称] [--no-seed]        初始化数据目录与第一�
   item rm <uuid|code> [更多...] --yes         删除记录（连带流水）
 
 分组 / 时间轴
-  group list [--levels 1|2|3] [--sort 字段]   三级分组 + 组内排序
+  group list [--levels 1|2|3] [--sort 字段]   分组（界面固定一级，命令行可要多级）+ 组内排序
   sort fields                                 列出可用的排序字段
   column list                                 看物品表有哪些列、现在开着哪些
   column set <列>... | --default | --show-all 设置显示哪些列（物品/到期时间不可关）
@@ -888,7 +910,7 @@ src/
 ├── main/main.ts             Electron 主进程：IPC 白名单，不含领域逻辑
 ├── preload/preload.ts       contextBridge，具名方法白名单
 ├── renderer/                index.html + app.ts + styles.css（零依赖原版 TS）
-└── test/core.test.ts        85 项：往返不变式、日期、CSV、隔离、批量、分组排序、回归
+└── test/core.test.ts        109 项：往返不变式、日期、CSV、隔离、批量、分组排序、回归
 scripts/build.mjs            编译 + 搬运静态资源
 ```
 

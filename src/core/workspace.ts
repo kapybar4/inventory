@@ -87,6 +87,20 @@ export interface WorkspaceEntry {
   groupLevels?: number;
   /** 排序字段；'manual' 表示排序关闭，按手动顺序 */
   sortField?: string;
+  /**
+   * **每个分组各自的排序**：路径 → `{ field, desc }`。
+   *
+   * 与 `sortField` 的区别：那个是"一个字段排全部"，这个是"每组一个"。
+   * 分组页改成点列头排序之后用的就是这一份 —— 药品按到期排、
+   * 日用品按名称排，互不影响。
+   *
+   * **表里没有的组 = 手动顺序**（可拖动）。所以"一个都没点过"就等于全手动，
+   * 不用再存一个"排序关闭"的标志。
+   *
+   * 路径用 `groupPathKey()` 拼（core 里唯一那处实现），
+   * 界面存与 core 查必须用同一个拼法，否则是"存了但读不到"且不报错。
+   */
+  groupSort?: Record<string, { field: string; desc: boolean }>;
   /** 哪些分组路径是收起的 */
   collapsed?: string[];
   /**
@@ -639,7 +653,10 @@ export function updateWorkspacePrefs(
   dataDir: string,
   id: string,
   patch: Partial<
-    Pick<WorkspaceEntry, 'groupOrder' | 'groupLevels' | 'sortField' | 'collapsed' | 'columns'>
+    Pick<
+      WorkspaceEntry,
+      'groupOrder' | 'groupLevels' | 'sortField' | 'groupSort' | 'collapsed' | 'columns'
+    >
   >,
 ): WorkspaceEntry {
   const reg = readRegistry(dataDir);
@@ -649,6 +666,7 @@ export function updateWorkspacePrefs(
   if (patch.groupOrder !== undefined) entry.groupOrder = patch.groupOrder;
   if (patch.groupLevels !== undefined) entry.groupLevels = Math.max(1, Math.min(3, patch.groupLevels));
   if (patch.sortField !== undefined) entry.sortField = patch.sortField;
+  if (patch.groupSort !== undefined) entry.groupSort = patch.groupSort;
   if (patch.collapsed !== undefined) entry.collapsed = patch.collapsed;
   // 列配置交给 resolveColumns 兜底（锁定列永远在），这里只做去重存档
   if (patch.columns !== undefined) entry.columns = resolveColumns(patch.columns);
