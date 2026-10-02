@@ -1,19 +1,29 @@
 /**
  * 打一个「双击即用」的绿色文件夹。
  *
- * 产出 `_release/Inventory/`：
+ * 产出 `release/Inventory/`：
  *
  *   Inventory/
  *   ├─ Inventory.exe        双击这个（见下面的「为什么要用启动器」）
- *   ├─ 启动.cmd             推荐双击这个
+ *   ├─ start.cmd            推荐双击这个
  *   ├─ data/                你的数据（工作区数据库），备份就拷这个目录
- *   ├─ .profile/            Chromium 的缓存 / 锁文件，纯垃圾，不用管
+ *   ├─ profile/             Chromium 的缓存 / 锁文件，纯垃圾，不用管
  *   └─ （Electron 运行时的一堆 dll / pak / locales）
+ *
+ * ── 目录名为什么都不带点或下划线 ──
+ * 绿色版是给普通用户看的，"`.profile` / `_release` 这种名字"对开发者是惯例，
+ * 对用户只是"看着像系统文件、不敢动"。所以一律用平常的名字：
+ * `release` / `profile` / `start.cmd`。
+ *
+ * 注意 `release/` 同时是 electron-builder 的**中间产物目录**
+ * （`build.directories.output`），它在里面放 `win-unpacked/`。
+ * 共用一个名字是有意的：中间产物用完就搬进 `release/Inventory/`，
+ * 不留第二份几百 MB 的东西。
  *
  * ── 为什么要用启动器 ──
  * 这台机器上 Electron **必须带 `--no-sandbox` 才能启动**，否则进程静默退出
  * （不打印任何东西，退出码还是 0，看起来就是"点了没反应"）。
- * 双击 exe 没法带参数，所以给一个 `启动.cmd` 代劳。
+ * 双击 exe 没法带参数，所以给一个 `start.cmd` 代劳。
  * 别的机器上直接双击 exe 多半也能用，两个都留着。
  *
  * ── 为什么不用 `npm run dist:win` ──
@@ -23,13 +33,17 @@
  * 用 `--config.electronDist` 指过去就能**完全离线**打包。
  *
  * ── 更新时数据不丢 ──
- * 脚本会先删掉旧的 `_release/Inventory`，但**先把 `data/` 挪出来**，
+ * 脚本会先删掉旧的 `release/Inventory`，但**先把 `data/` 挪出来**，
  * 打完再放回去。所以"覆盖更新"不会碰到你的数据。
- * `.profile/` 直接丢掉重建 —— 它只是缓存。
+ * `profile/` 直接丢掉重建 —— 它只是缓存。
+ *
+ * ── 绿色版里不放测试数据 ──
+ * 全程不调 `init`，所以打出来的是一个**空的数据目录**：
+ * 用户第一次打开看到的是"还没有工作区"，而不是一堆示例物品。
+ * （`init` 默认会塞演示数据，那是给开发和试用用的。）
  */
 import { spawnSync } from 'node:child_process';
 import {
-  cpSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -42,10 +56,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const outRoot = join(root, '_release');
-const outDir = join(outRoot, 'Inventory');
+const releaseDir = join(root, 'release');
+const outDir = join(releaseDir, 'Inventory');
 const dataDir = join(outDir, 'data');
-const stash = join(outRoot, '_data-stash');
+const stash = join(releaseDir, 'data-stash');
 
 const log = (m) => process.stdout.write(`${m}\n`);
 const fail = (m) => {
@@ -75,7 +89,9 @@ const build = spawnSync(process.execPath, [join(root, 'scripts', 'build.mjs')], 
 if (build.status !== 0) fail(`编译失败（退出码 ${build.status}）`);
 
 // ── 2. 把旧的数据挪出来（覆盖更新不丢数据）──
-mkdirSync(outRoot, { recursive: true });
+// stash 放在 `release/` 下、**不能放在 `release/Inventory/` 里** ——
+// 下面第 3 步会整个删掉 `release/Inventory`，放里面的话刚挪出来就被删了。
+mkdirSync(releaseDir, { recursive: true });
 rmSync(stash, { recursive: true, force: true });
 let hadData = false;
 if (existsSync(dataDir)) {
@@ -113,13 +129,34 @@ if (pack.status !== 0) {
 }
 
 // electron-builder 的 dir 目标产出在 release/win-unpacked，搬到我们要的位置
-const produced = join(root, 'release', 'win-unpacked');
+const produced = join(releaseDir, 'win-unpacked');
 if (!existsSync(produced)) fail(`没找到打包产物：${produced}`);
-mkdirSync(outRoot, { recursive: true });
 rmSync(outDir, { recursive: true, force: true });
 renameSync(produced, outDir);
-// release/ 中间产物用完就清掉，别留两份几百 MB 的东西
-rmSync(join(root, 'release'), { recursive: true, force: true });
+
+/*
+ * 清掉 electron-builder 留在 `release/` 根上的中间产物。
+ *
+ * 最显眼的是 `builder-debug.yml`（它自己打包时的配置快照）—— 那是给
+ * 排查打包问题用的，对用户毫无意义，摆在产物旁边只会让人猜"这是什么"。
+ *
+ * **必须显式列举，不能用"除 Inventory 之外全删"。**
+ * 同级的 `data-stash/` 就是用户数据（第 2 步挪出来的），
+ * "全删"会把它一起删掉，第 4 步再想搬回去就是 ENOENT ——
+ * 而且打包**看起来是成功的**，只有数据没了。这类"宽泛清理规则误伤自己人"
+ * 比漏删难查得多：删东西的代码从来不报错。
+ *
+ * 顺带把 `release/` 里**所有非目录的散落文件**清掉
+ * （electron-builder 还可能留别的调试文件），目录一律显式列举。
+ */
+for (const name of ['builder-debug.yml', 'builder-effective-config.yaml']) {
+  rmSync(join(releaseDir, name), { force: true });
+}
+for (const name of readdirSync(releaseDir)) {
+  const p = join(releaseDir, name);
+  if (name === 'Inventory' || name === 'data-stash') continue;
+  if (!statSync(p).isDirectory()) rmSync(p, { force: true });
+}
 
 // ── 4. 放回数据 + 建空的 data/ ──
 if (hadData) {
@@ -133,7 +170,7 @@ writeFileSync(join(dataDir, '.gitignore'), '*\n!.gitignore\n', 'utf8');
 
 // ── 5. 启动器 ──
 writeFileSync(
-  join(outDir, '启动.cmd'),
+  join(outDir, 'start.cmd'),
   [
     '@echo off',
     'rem 双击这个启动。',
@@ -153,18 +190,21 @@ writeFileSync(
     '家庭物品管理 —— 绿色版',
     '',
     '【怎么打开】',
-    '  双击「启动.cmd」。',
+    '  双击 start.cmd。',
     '  如果双击 Inventory.exe 也能开，那就直接用 exe（少一个黑窗口闪一下）。',
+    '',
+    '【第一次打开是空的】',
+    '  里面没有任何示例数据 —— 自己点「新建工作区」开始记。',
     '',
     '【数据在哪】',
     '  data\\ 这个文件夹。一个工作区 = 里面一个子目录。',
     '  换电脑 / 备份：整个拷走 data\\ 就行。',
     '',
     '【更新版本】',
-    '  把这个文件夹整个换掉，但要**留下 data\\**。',
+    '  把这个文件夹整个换掉，但要留下 data\\。',
     '  在源码目录里跑 node scripts/release.mjs 也会自动保留 data\\。',
     '',
-    '【.profile 是什么】',
+    '【profile 是什么】',
     '  浏览器内核的缓存和锁文件，纯垃圾，删了会自动重建，不用管。',
     '',
     '【东西存哪了 / 命令行】',
@@ -194,4 +234,5 @@ log(`  产物    ${outDir}`);
 log(`  总大小  ${mb(size(outDir))}`);
 log(`  数据    ${hadData ? '已保留原有 data/' : '新建了空 data/'}`);
 log('');
-log('  双击「启动.cmd」即可使用。');
+log('  双击 start.cmd 即可使用。');
+log('  绿色版是**空的**：没有任何示例数据，第一次打开自己建工作区。');

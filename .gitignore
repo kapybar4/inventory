@@ -50,5 +50,10 @@ Thumbs.db
 # 绿色版产物（node scripts/release.mjs 生成）
 #
 # 里面有整份 Electron 运行时（约 370MB）和用户数据，绝不入库。
+#
+# 这个名字**同时是 electron-builder 的中间产物目录**
+# （`build.directories.output` = `release`，它在里面放 `win-unpacked/`）。
+# 两边共用一个名字是有意的：中间产物用完就被搬到 `release/Inventory/`，
+# 不留第二份几百 MB 的东西，也就只需要忽略这一个目录。
 # ─────────────────────────────────────────────────────────────
-/_release/
+/release/

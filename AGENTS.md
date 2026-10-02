@@ -553,8 +553,9 @@ npm.cmd run test:all    # 单元 + 功能
 
 ### 绿色版打包（`npm.cmd run release`）
 
-产出 `_release/Inventory/`，一个**自包含、双击即用**的文件夹（约 370MB）。
-已实测：能起窗口、`data/` 落在 exe 旁边、**覆盖更新后数据指纹不变**。
+产出 `release/Inventory/`，一个**自包含、双击即用**的文件夹（约 370MB）。
+已实测：能起窗口、`data/` 落在 exe 旁边、**覆盖更新后数据指纹不变**、
+`release/` 里只剩 `Inventory/` 一个目录、数据目录是空的（不含测试数据）。
 
 - **不要用 `npm.cmd run dist:win`** —— electron-builder 的 `portable` / `nsis`
   目标要从 **github.com** 下 Electron 发行包，而本机连不上 GitHub
@@ -569,19 +570,44 @@ npm.cmd run test:all    # 单元 + 功能
   锁文件**（"Lock file can not be created: 拒绝访问"）→ 双击 exe
   **静默退出、什么都不打印、退出码 0**，用户看到的是"点了没反应"。
   所以 `main.ts` 里有 `pinUserDataDirNextToExe()`，把 `userData` 指到
-  `<程序目录>/.profile`（只在 `app.isPackaged` 时生效，不干扰开发流程；
+  `<程序目录>/profile`（只在 `app.isPackaged` 时生效，不干扰开发流程；
   命令行显式给了 `--user-data-dir` 也不改）。
-- **`.profile` 与 `data` 必须分开。** `data/` 是用户家当，要备份、要跟着走；
+- **`profile` 与 `data` 必须分开。** `data/` 是用户家当，要备份、要跟着走；
   profile 是缓存 / 锁文件 / GPU 缓存，纯垃圾。混在一起会让
   "拷贝 `data/` 即完成迁移"这句话不成立。
-- **`启动.cmd` 不是多余的。** 这台机器上 Electron 不带 `--no-sandbox`
+- **目录名和文件名一律不带点或下划线。** 是 `profile` 不是 `.profile`、
+  是 `release` 不是 `_release`、是 `start.cmd` 不是 `启动.cmd`。
+  绿色版是给普通用户看的：`data` 和 `profile` 并排摆着，
+  一眼就分得清"哪个要备份、哪个不用管"；点开头在开发者眼里是"隐藏"，
+  在用户眼里只是"像系统文件、不敢动"。
+- **`start.cmd` 不是多余的。** 这台机器上 Electron 不带 `--no-sandbox`
   同样**静默退出**（同样什么都不打印），而双击 exe 没法带参数，
   所以给一个 `.cmd` 代劳。两个都留着：别的机器上直接双击 exe 多半也能用。
   排查这一类"点了没反应"时，**先用 `--no-sandbox` 跑一次**再怀疑自己的代码。
-- **覆盖更新不能碰 `data/`。** `scripts/release.mjs` 先把 `data/` 挪到
-  `_release/_data-stash`，打完再放回去；**打包失败也要放回去**
-  （不然用户的数据就"被更新弄丢了"）。中间产物 `release/` 用完清掉。
-- `_release/` 已在 `.gitignore` 里（里面有整份 Electron 与用户数据）。
+- **覆盖更新不能碰 `data/`，而"清理中间产物"最容易把这条毁掉。**
+  脚本先把 `data/` 挪到 `release/data-stash`，打完再放回；
+  **打包失败也要放回去**（不然用户的数据就"被更新弄丢了"）。
+  ⚠️ 这里连续踩过两次，是同一个坑的两面：
+    1. stash 一开始放在 `release/Inventory/` **里面**，
+       而第 3 步要整个删掉 `release/Inventory` —— 刚挪出来就被删了。
+    2. 改成"`release/` 里除 `Inventory` 之外全删"之后，
+       `data-stash` 同样被删（它就在同级）。
+  **清理规则必须是显式列举，不能是"除某某之外全删"。**
+  后者会在下次有人往同一个目录里加东西时静默误伤 ——
+  删东西的代码从来不报错，而打包**看起来是成功的**，只有数据没了。
+  现在只删 `builder-debug.yml` / `builder-effective-config.yaml`
+  和 `release/` 根下的散落文件，目录一律点名。
+- **绿色版里不放测试数据。** 打包流程**不调 `init`**，所以打出来的是空数据目录，
+  用户第一次打开看到"还没有工作区"，而不是一堆示例物品
+  （`init` 默认塞演示数据，那是给开发和试用用的）。
+- **`readdirSync` 不带 `withFileTypes` 时返回字符串数组**，
+  对元素取 `.name` 是 `undefined`，`join` 会抛
+  `ERR_INVALID_ARG_TYPE: The "path" argument must be of type string` ——
+  报错位置指向 `join` 那行，看不出是 `readdirSync` 的用法问题。
+- `release/` 在 `.gitignore` 里（里面有整份 Electron 与用户数据）。
+  它**同时是 electron-builder 的中间产物目录**（`build.directories.output`），
+  共用一个名字是有意的：中间产物用完就被搬进 `release/Inventory/`，
+  不留第二份几百 MB 的东西。
 
 ### 桌面端走查的写法
 
@@ -661,7 +687,7 @@ npm.cmd run cli -- schema show
 
 **没验证**：
 - **`npm.cmd run dist:win`（electron-builder 的 portable / nsis 目标）没走过。**
-  走通的替代品是 `npm.cmd run release` → `_release/Inventory/`（见「绿色版」那节）。
+  走通的替代品是 `npm.cmd run release` → `release/Inventory/`（见「绿色版」那节）。
 - **桌面端走查（`test:gui`）会在第 18 步附近卡住**（`03o_分组页也有简明视图`），
   卡在之后的 `executeJavaScript` 上不返回，整轮 140 秒超时结束。
   已知：**不是产品缺陷** —— 同一串操作在聚焦探针里单跑都正常

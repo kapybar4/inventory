@@ -1587,7 +1587,7 @@ function warnIfDataDirLooksWrong(): void {
 }
 
 /**
- * 打包后，把 Chromium 的 profile 放到 exe 旁边（`.profile/`）。
+ * 打包后，把 Chromium 的 profile 放到 exe 旁边（`profile/`）。
  *
  * ── 为什么必须做这一步 ──
  * Chromium 默认把 profile 写在 `%LOCALAPPDATA%\<productName>` 下。
@@ -1595,10 +1595,15 @@ function warnIfDataDirLooksWrong(): void {
  * 于是双击 exe 会**静默退出、什么都不打印** —— 用户看到的是"点了没反应"。
  * 开发时之所以没这个问题，是因为启动脚本一直带着 `--user-data-dir`。
  *
- * ── 为什么是 `.profile` 而不是 `data` ──
+ * ── 为什么是 `profile` 而不是 `data` ──
  * `data/` 放的是用户家当（工作区数据库），是**要备份、要跟着走**的东西；
  * Chromium 的缓存 / 锁文件 / GPU 缓存是**纯垃圾**，混进去只会让备份变脏、
  * 让"拷贝 data/ 即完成迁移"这句话不再成立。所以分成两个目录。
+ *
+ * ── 为什么不用 `.profile` 这种点开头的名字 ──
+ * 绿色版是给普通用户看的，`data` 和 `profile` 并排摆着，一眼就分得清
+ * "哪个要备份、哪个不用管"。点开头在开发者眼里是"隐藏文件"，
+ * 在用户眼里只是"看起来像系统文件、不敢动"。
  *
  * ── 只在打包形态改，不碰开发流程 ──
  * `app.isPackaged` 为 false 时（`npm start` / 探针）直接返回：
@@ -1612,7 +1617,7 @@ function pinUserDataDirNextToExe(): void {
   if (!app.isPackaged) return;
   if (process.argv.some((a) => a.startsWith('--user-data-dir'))) return;
 
-  const dir = join(programDir(), '.profile');
+  const dir = join(programDir(), 'profile');
   if (!isDirWritable(dir).ok) return;
   app.setPath('userData', dir);
 }
