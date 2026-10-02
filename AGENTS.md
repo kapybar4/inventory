@@ -551,6 +551,38 @@ npm.cmd run test:all    # 单元 + 功能
   要么先自己准备数据，要么老老实实跑全流程。
 - **回归测试要写清"当初是怎么坏的"**，否则以后有人顺手简化又会踩回去。
 
+### 绿色版打包（`npm.cmd run release`）
+
+产出 `_release/Inventory/`，一个**自包含、双击即用**的文件夹（约 370MB）。
+已实测：能起窗口、`data/` 落在 exe 旁边、**覆盖更新后数据指纹不变**。
+
+- **不要用 `npm.cmd run dist:win`** —— electron-builder 的 `portable` / `nsis`
+  目标要从 **github.com** 下 Electron 发行包，而本机连不上 GitHub
+  （只有 npmmirror / npmjs 可达）。`scripts/release.mjs` 用
+  `--config.electronDist=node_modules/electron/dist` 指向本地那份，**完全离线**。
+  代价：源码目录必须先 `npm install` 过一次（否则没有 Electron 运行时）。
+- **也不要改成 electron-builder 的 `portable` 目标**：它是自解压到临时目录运行的，
+  `process.execPath` 会指向临时目录，于是"数据在 exe 旁边"这句话就失效了
+  ——数据会写进临时文件夹，退出即消失。`dir` 目标（解压好的文件夹）才是对的。
+- **打包后必须让 Chromium 的 profile 也落在 exe 旁边。**
+  Chromium 默认写 `%LOCALAPPDATA%\<productName>`，而**这台机器上那里建不了
+  锁文件**（"Lock file can not be created: 拒绝访问"）→ 双击 exe
+  **静默退出、什么都不打印、退出码 0**，用户看到的是"点了没反应"。
+  所以 `main.ts` 里有 `pinUserDataDirNextToExe()`，把 `userData` 指到
+  `<程序目录>/.profile`（只在 `app.isPackaged` 时生效，不干扰开发流程；
+  命令行显式给了 `--user-data-dir` 也不改）。
+- **`.profile` 与 `data` 必须分开。** `data/` 是用户家当，要备份、要跟着走；
+  profile 是缓存 / 锁文件 / GPU 缓存，纯垃圾。混在一起会让
+  "拷贝 `data/` 即完成迁移"这句话不成立。
+- **`启动.cmd` 不是多余的。** 这台机器上 Electron 不带 `--no-sandbox`
+  同样**静默退出**（同样什么都不打印），而双击 exe 没法带参数，
+  所以给一个 `.cmd` 代劳。两个都留着：别的机器上直接双击 exe 多半也能用。
+  排查这一类"点了没反应"时，**先用 `--no-sandbox` 跑一次**再怀疑自己的代码。
+- **覆盖更新不能碰 `data/`。** `scripts/release.mjs` 先把 `data/` 挪到
+  `_release/_data-stash`，打完再放回去；**打包失败也要放回去**
+  （不然用户的数据就"被更新弄丢了"）。中间产物 `release/` 用完清掉。
+- `_release/` 已在 `.gitignore` 里（里面有整份 Electron 与用户数据）。
+
 ### 桌面端走查的写法
 
 `scripts/guitest.cjs` 每一步**单独一次 `executeJavaScript`**。
@@ -623,12 +655,13 @@ npm.cmd run cli -- schema show
 
 ## 当前状态与已知缺口
 
-**已验证**：核心功能、单元 109 项、CLI 147 项、往返不变式。
+**已验证**：核心功能、单元 109 项、CLI 147 项、往返不变式、
+**绿色版打包（`npm.cmd run release`）**。
 桌面端走查的 34 步现在跑不完（见下），改界面时改用聚焦探针确认。
 
 **没验证**：
-- **打包（`npm.cmd run dist:win`）从未跑通过。** electron-builder 已配好、
-  `files` 白名单已列全，但产出安装包这条路没走过。要分发给别人用，这是第一件该验的事。
+- **`npm.cmd run dist:win`（electron-builder 的 portable / nsis 目标）没走过。**
+  走通的替代品是 `npm.cmd run release` → `_release/Inventory/`（见「绿色版」那节）。
 - **桌面端走查（`test:gui`）会在第 18 步附近卡住**（`03o_分组页也有简明视图`），
   卡在之后的 `executeJavaScript` 上不返回，整轮 140 秒超时结束。
   已知：**不是产品缺陷** —— 同一串操作在聚焦探针里单跑都正常

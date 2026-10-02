@@ -10,7 +10,45 @@
 
 ---
 
-## 快速开始
+## 只想用，不想装开发环境 —— 打一个双击即用的绿色文件夹
+
+不需要装 Node、不需要 `npm install`，跑一条命令就能得到一个**自包含的文件夹**：
+
+```bash
+npm.cmd run release
+```
+
+产出 `_release/Inventory/`（约 370MB，因为里面装着整份 Electron 运行时）：
+
+```
+_release/Inventory/
+├─ 启动.cmd          ← 双击这个
+├─ Inventory.exe       直接双击在多数机器上也可以
+├─ data/             ← 你的数据。备份 / 换电脑就拷这个目录
+├─ .profile/           浏览器内核的缓存和锁文件，纯垃圾，不用管
+└─ （Electron 运行时的 dll / pak / locales 等）
+```
+
+几点值得说明的：
+
+- **`data/` 就在 exe 旁边。** 这是刻意的取舍：整个文件夹拷到 U 盘、
+  换个电脑，数据和程序一起走，不用重新配置路径。
+  代价是**别把它放进 `Program Files`** —— 那里写不进去，
+  程序会退化成"整页置灰、只有设置数据目录能用"的状态
+  （那时用界面底部的「设置数据目录」指到别处即可）。
+- **`_release/` 已被 `.gitignore` 忽略**，不会进仓库、不会被误提交。
+- **更新时数据不丢。** 拉到新代码后重跑 `npm.cmd run release`，
+  脚本会先把 `data/` 挪到一边、打完再放回原位，中间产物 `release/` 也一并清掉。
+  手工覆盖也行：整个文件夹换掉，只留下 `data/`。
+- **`启动.cmd` 不是多余的。** 这台机器上 Electron 不带 `--no-sandbox`
+  会**静默退出**（不打印任何东西、退出码还是 0，看起来就是"点了没反应"），
+  而双击 exe 没法带参数，所以给了一个 `.cmd` 代劳。
+- 打包**完全离线**：electron-builder 默认要从 github.com 下 Electron 发行包，
+  本机连不上，所以脚本用 `--config.electronDist` 指向
+  `node_modules/electron/dist` 里已有那份。
+  也因此它要求先在源码目录跑过一次 `npm.cmd install`。
+
+## 快速开始（开发）
 
 ```bash
 git clone <这个仓库>
@@ -29,7 +67,7 @@ npm.cmd start                # 桌面界面（可选）
 
 ```bash
 npm.cmd run typecheck   # 两套 tsconfig
-npm.cmd test            # 105 项单元测试
+npm.cmd test            # 109 项单元测试
 npm.cmd run test:func   # 147 项 CLI 功能测试
 ```
 
@@ -924,7 +962,7 @@ scripts/build.mjs            编译 + 搬运静态资源
 
 ```
 npm.cmd run typecheck   # 主进程/CLI/core + 渲染层，两套 tsconfig
-npm.cmd test            # 105 项单元测试（不变量 + 回归）
+npm.cmd test            # 109 项单元测试（不变量 + 回归）
 npm.cmd run test:func   # 147 项 CLI/数据层功能测试（真跑命令、核对输出）
 npm.cmd run test:gui    # 34 步桌面端走查（真开 Electron，读 DOM）—— 目前会中途卡住，见「已知限制」
 npm.cmd run test:all    # 单元 + 功能

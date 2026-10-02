@@ -36,6 +36,7 @@ import {
   quarantineWorkspace,
   unquarantineWorkspace,
   defaultDataDir,
+  programDir,
 } from '../core/workspace';
 import {
   openDatabase,
@@ -1585,10 +1586,42 @@ function warnIfDataDirLooksWrong(): void {
   );
 }
 
+/**
+ * 打包后，把 Chromium 的 profile 放到 exe 旁边（`.profile/`）。
+ *
+ * ── 为什么必须做这一步 ──
+ * Chromium 默认把 profile 写在 `%LOCALAPPDATA%\<productName>` 下。
+ * 这台机器上那个位置**建不了锁文件**（"Lock file can not be created: 拒绝访问"），
+ * 于是双击 exe 会**静默退出、什么都不打印** —— 用户看到的是"点了没反应"。
+ * 开发时之所以没这个问题，是因为启动脚本一直带着 `--user-data-dir`。
+ *
+ * ── 为什么是 `.profile` 而不是 `data` ──
+ * `data/` 放的是用户家当（工作区数据库），是**要备份、要跟着走**的东西；
+ * Chromium 的缓存 / 锁文件 / GPU 缓存是**纯垃圾**，混进去只会让备份变脏、
+ * 让"拷贝 data/ 即完成迁移"这句话不再成立。所以分成两个目录。
+ *
+ * ── 只在打包形态改，不碰开发流程 ──
+ * `app.isPackaged` 为 false 时（`npm start` / 探针）直接返回：
+ * 开发时用户会显式传 `--user-data-dir`，改了就冲突。
+ *
+ * 命令行显式给了 `--user-data-dir` 也不改 —— 那是用户的明确意图。
+ * 写在 exe 旁边的位置仍不可写时（装进了 Program Files），
+ * 退回 Electron 的默认位置，不硬撑。
+ */
+function pinUserDataDirNextToExe(): void {
+  if (!app.isPackaged) return;
+  if (process.argv.some((a) => a.startsWith('--user-data-dir'))) return;
+
+  const dir = join(programDir(), '.profile');
+  if (!isDirWritable(dir).ok) return;
+  app.setPath('userData', dir);
+}
+
+pinUserDataDirNextToExe();
+
 // 同一时间只允许一个实例：两个进程同时写同一个 SQLite 虽然安全（WAL），
 // 但用户会看到两个窗口在互相刷新，体验很差
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
+if (!app.requestSingleInstanceLock()) {  app.quit();
 } else {
   app.on('second-instance', () => {
     if (mainWindow) {
