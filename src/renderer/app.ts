@@ -648,7 +648,15 @@ function stockBar(current: number, limit: number, low: boolean): HTMLElement {
   const fill = el('div', { class: `fill${low ? ' low' : ''}` });
   const denom = Math.max(limit, current, 1);
   fill.style.width = `${Math.min(100, Math.round((current / denom) * 100))}%`;
-  if (current === 0) fill.className = 'fill empty';
+  /*
+   * 剩余为 0 时**不要用 `empty` 这个类名**。
+   *
+   * 样式表里已经有一个全局的 `.empty`（整页占位块：padding 56px 24px + 虚线框）。
+   * 两者一撞，这条 6px 高的小条会吃到那个 48px 的水平内边距，
+   * `width: 0%` 再也压不下去 —— 表现是"剩余为 0，却画出一条几乎占满的红条"，
+   * 语义完全反了。过宽的内边距撑开元素比缺样式更难查：宽度看起来像是"算出来的"。
+   */
+  if (current === 0) fill.classList.add('zero');
   track.append(fill);
   wrap.append(track, el('b', { text: String(current) }));
   return wrap;
