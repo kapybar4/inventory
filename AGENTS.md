@@ -639,13 +639,31 @@ npm.cmd run test:all    # 单元 + 功能
   而且把表单撑成两栏、空一大块。它讲的是整个弹窗要做什么，
   所以应该在"要动手了"的位置上再交代一次 —— 也就是操作栏。
   现在 `openModal` 收一个 `hint`，渲染成 `.modal-hint`（`--fg-faint`、12px）。
-  布局靠操作栏自己的 `justify-content: flex-end`：hint 是第一个子元素，
-  剩余空间都堆到左边，于是**它贴左、按钮贴右**，
-  不用给按钮补 `margin-left: auto`。
-  关键一条：`.modal-hint` 必须是 `flex: 0 1 auto` ——
+  它要和表单里的「工作区名称」**同一左边界**（实测两边都是 363.67）。
+  做到这一点只需要 `margin-right: auto` —— 操作栏是
+  `justify-content: flex-end`，auto 吃掉全部剩余空间，于是
+  **hint 贴左（落在内容栏上）、按钮贴右**，不用给按钮补 `margin-left: auto`。
+  ⚠️ **往左推要靠 auto margin 抢空间，不要靠负 margin 推。** 我连着试错两次：
+    1. 先写 `margin-left: 负值` —— 在 `justify-content: flex-end` 下
+       **完全不管用**：负外边距影响的是 flex 的剩余空间计算（外尺寸算小了，
+       整组右移），不是把这一项单独往左推。实测写 -20px，left 一点没动。
+    2. 再写 `margin-left: -20px`（想抵消内边距）—— 这时 auto 右边距已经在
+       起作用了，负值就**过冲** 20px，提示跑到操作栏的边框盒边缘上。
+    结论：**auto margin 抢空间；不要用负 margin 位移。**
+  ⚠️ **量对齐时别 `Math.round` 再比。** 标签真实值是 363.67，取整后我读成
+  364，于是"差 20 还是 19"就说不清了，白绕了两轮。
+  看 `getBoundingClientRect()` 的原值。
+  ⚠️ 也**别照着"应该有几像素边框"去推**：我按边框盒/内边距盒推过一步，
+  后来读 `getComputedStyle` 才发现 `.modal-actions` 的
+  `border-left-width` 是 **0**（那条 `border-top: 1px` 只画上边）。
+  推断前先读实际值。
+  另一条：`.modal-hint` 必须是 `flex: 0 1 auto` ——
   写成 `flex: 1` 会把空白全吃掉，看起来是"左右各占一半"，
-  而不是"一句话靠左、按钮靠右"；`shrink: 1` 让它窄窗里能换行收缩，
-  不至于把按钮挤出去（760px 实测过）。
+  而不是"一句话靠左、按钮靠右"；窄窗里靠 `max-width: 100%` 换行收缩，
+  不至于把按钮挤出去（760px 实测：提示一行 18px 高、两个按钮都在框内、
+  与提示不重叠）。
+  `.modal-body` / `.modal-actions` 的左右内边距抽成了 `--modal-pad`
+  （定义在 `.modal` 上）：两者必须同源，否则提示与表单就会错位。
   ⚠️ 操作栏的实际次序是 `[hint] [actions…] [extraActions…] [取消]`。
   `extraActions` 的注释原来写的是"放进取消键的左边"（= 最右），
   加了 hint 之后就不再在最右了，注释也一并改准 ——

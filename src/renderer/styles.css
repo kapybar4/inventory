@@ -2352,6 +2352,16 @@ tr.batch-on > td:first-child {
 }
 
 .modal {
+  /*
+   * 弹窗内容栏的左右内边距，**一处定义、三处引用**
+   * （`.modal-body`、`.modal-actions`、`.modal-hint` 的负外边距）。
+   *
+   * 为什么必须是变量：`.modal-hint` 要用 `calc(var(--modal-pad) * -1)`
+   * 把自己从操作栏的内边距里拉回内容栏、跟表单文字对齐。
+   * 三者一旦不同步，提示就会错位若干像素 —— 而且**不会报错**，
+   * 只是"看着没对齐"。这种对齐关系写死数字迟早会漂。
+   */
+  --modal-pad: 20px;
   background: var(--bg-1);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-lg);
@@ -2383,7 +2393,7 @@ tr.batch-on > td:first-child {
 }
 
 .modal-body {
-  padding: 18px 20px;
+  padding: 18px var(--modal-pad);
   overflow: auto;
 }
 
@@ -2391,7 +2401,7 @@ tr.batch-on > td:first-child {
   display: flex;
   justify-content: flex-end;
   gap: 9px;
-  padding: 14px 20px;
+  padding: 14px var(--modal-pad);
   border-top: 1px solid var(--line-soft);
   background: var(--bg);
   border-radius: 0 0 var(--r-lg) var(--r-lg);
@@ -2400,19 +2410,39 @@ tr.batch-on > td:first-child {
 /*
  * 操作栏前部的半灰说明。
  *
- * 定位靠父容器的 `justify-content: flex-end` —— 它是第一个子元素，
- * 容器把剩下的空间都推到左边，于是它贴左、按钮贴右，
- * 不用给按钮补 `margin-left: auto`，也不用在这里写 auto margin。
+ * ── 怎么定位到"贴左、按钮贴右" ──
+ * 父容器是 `justify-content: flex-end`（为了让按钮靠右）。
+ * 在这个容器里给提示写 **`margin-right: auto`**，它就把提示顶到
+ * 内容栏的最左边，auto 吃掉全部剩余空间，按钮自然留在最右。
+ * 实测：`margin-right: auto` + `margin-left: 0` → 提示 left 363.67，
+ * 和「工作区名称」标签（363.67）、输入框完全同列。
  *
- * `flex: 0 1 auto` 是关键：**basis 用 auto（取内容宽度）而不是 1** ——
- * 写 `flex: 1` 会让它把空白全吃掉，看起来就是"左右各占一半"，
- * 而不是"一句话靠左、按钮靠右"。`shrink: 1` 让它窄弹窗里能换行收缩，
- * 不至于把按钮挤出去。`align-self: center` 让它在按钮那行里垂直居中。
+ * 所以**不需要任何负外边距** —— 内容栏本来就是操作栏内边距之后的起点，
+ * 而表单文字也在那里，两者天然同列。
+ *
+ * ⚠️ 这一条我连着试错两次，都记在这儿：
+ *   1. 想用 `margin-left: 负值` 往左拉 —— **在 `justify-content: flex-end`
+ *      下不管用**。负外边距影响的是 flex 的剩余空间计算（外尺寸算小了，
+ *      整组右移），不是把这一项单独往左推。实测写 -20px，元素 left 一点没动。
+ *   2. 换成 `margin-left: -20px`（想抵消内边距）—— 这时 auto 右边距
+ *      已经在起作用了，负值就**过冲**：提示落到 343.67，跑到操作栏的
+ *      边框盒边缘上，比目标多左了 20px。
+ *   结论：**往左推靠 auto margin 抢空间，不要靠负 margin 推。**
+ *
+ * 另外量对齐时**别 round 再比**：标签真实值是 363.67，取整后读成 364，
+ * 于是"差 20 还是 19"根本说不清。要看 `getBoundingClientRect()` 的原值。
+ *
+ * ── 为什么会换行 ──
+ * `flex-basis` 取 auto（内容宽度），`max-width: 100%` 让它在窄弹窗里
+ * 收缩到内容栏宽度就换行，不会把按钮挤出弹窗
+ * （760px 实测过：提示换行、两个按钮都还在框内）。
+ * 写 `flex: 1` 是错的 —— 那会让它把空白全吃掉，看起来是"左右各占一半"。
  */
 .modal-hint {
   flex: 0 1 auto;
-  min-width: 0;
+  max-width: 100%;
   align-self: center;
+  margin-right: auto;
   color: var(--fg-faint);
   font-size: 12px;
   line-height: 1.45;
