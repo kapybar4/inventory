@@ -796,12 +796,26 @@ interface ModalSpec {
   actions: { label: string; kind?: 'primary' | 'danger' | 'ghost'; onClick: () => unknown }[];
   wide?: boolean;
   /**
-   * 已经做好的按钮，直接放进操作栏**取消键的左边**。
+   * 已经做好的按钮，直接追加在操作栏**最右边**。
    *
    * 给"按钮上要挂自己的状态"的场合用（比如数据目录那三个里，
    * 「保存」的 disabled 由浏览结果决定，用 actions 的声明式写法够不着）。
+   *
+   * 实际次序是：`[hint] [actions…] [extraActions…] [取消]` ——
+   * 声明时按"从左到右"读，不用去猜"它到底插在哪两个之间"。
    */
   extraActions?: HTMLElement[];
+  /**
+   * 操作栏最前面的一行半灰说明。
+   *
+   * 给"整块说明"用：它讲的是**这个弹窗整体**要做什么，而不是某一个字段 ——
+   * 所以不该挤在表单里占一整行，把下面的字段往下推。
+   * 放在操作栏前部，正好在"要动手了"的位置上再交代一次。
+   *
+   * 定位靠操作栏自己的 `justify-content: flex-end`：它是第一个子元素，
+   * 剩下的空间都堆到左边，于是它贴左、按钮贴右（见 `.modal-hint`）。
+   */
+  hint?: string;
 }
 
 function openModal(spec: ModalSpec): void {
@@ -821,6 +835,12 @@ function openModal(spec: ModalSpec): void {
   box.append(body);
 
   const actions = el('div', { class: 'modal-actions' });
+  /*
+   * 半灰说明放在**最前**，靠容器自己的 `justify-content: flex-end` 顶到最左，
+   * 按钮自然留在最右 —— 不用给按钮加 `margin-left: auto`。
+   * `flex: 0 1 auto` 让它只占文字宽度、需要时能换行收缩，不抢按钮的位置。
+   */
+  if (spec.hint) actions.append(el('span', { class: 'modal-hint', text: spec.hint }));
   for (const a of spec.actions) {
     const btn = el('button', { class: a.kind ?? 'ghost', text: a.label });
     btn.addEventListener('click', async () => {
@@ -4095,16 +4115,17 @@ function openNewWorkspace(): void {
    * 想看效果的人不缺入口：命令行 `dsh-inv ws seed <工作区>` 专门做这件事，
    * 而且它要求工作区是空的，不会污染已有的数据。
    */
-  body.append(
-    el('p', {
-      class: 'muted',
-      text: '新工作区是一个全新的空 SQLite 文件，与其它工作区完全隔离。',
-    }),
-  );
-
+  /*
+   * 那句"全新的空 SQLite 文件、与其它工作区隔离"从表单里挪到了操作栏前部。
+   *
+   * 它讲的是**这个弹窗整体**要做什么，不是"名称"这个字段怎么填 ——
+   * 挂在输入框右边，读起来像是给名称的补充说明，而且把表单撑成两栏、
+   * 整块显得很空。移到操作栏前部（半灰），正好在"要动手了"的位置再交代一次。
+   */
   openModal({
     title: '新建工作区',
     body,
+    hint: '新工作区是一个全新的空 SQLite 文件，与其它工作区完全隔离。',
     actions: [
       {
         label: '创建',

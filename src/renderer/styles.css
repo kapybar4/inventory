@@ -2381,6 +2381,27 @@ tr.batch-on > td:first-child {
   border-radius: 0 0 var(--r-lg) var(--r-lg);
 }
 
+/*
+ * 操作栏前部的半灰说明。
+ *
+ * 定位靠父容器的 `justify-content: flex-end` —— 它是第一个子元素，
+ * 容器把剩下的空间都推到左边，于是它贴左、按钮贴右，
+ * 不用给按钮补 `margin-left: auto`，也不用在这里写 auto margin。
+ *
+ * `flex: 0 1 auto` 是关键：**basis 用 auto（取内容宽度）而不是 1** ——
+ * 写 `flex: 1` 会让它把空白全吃掉，看起来就是"左右各占一半"，
+ * 而不是"一句话靠左、按钮靠右"。`shrink: 1` 让它窄弹窗里能换行收缩，
+ * 不至于把按钮挤出去。`align-self: center` 让它在按钮那行里垂直居中。
+ */
+.modal-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  align-self: center;
+  color: var(--fg-faint);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .form {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
