@@ -202,9 +202,18 @@ td,
  *
  * 保留 `pointer-events`：点击要能新建工作区（见 app.ts 里那一支），
  * 所以只改光标与配色，不真的屏蔽点击。
+ *
+ * ⚠️ **类名叫 `blank` 而不是 `empty`，这是有原因的。**
+ * 样式表里早有一个全局的 `.empty`（整页占位块：`padding: 56px 24px`
+ * + 虚线框 + 居中）。两个类一撞，这个 26px 高的小按钮吃到 56px 的上下
+ * 内边距，**算出来高 133px**，顶出顶栏（52px）压到下面的横幅上 ——
+ * 表现是"下拉框下面凭空多出一块矩形"，看着像渲染坏了。
+ * 这跟 `.fill.empty` 那条（见上面 stock-bar 那段注释）是**同一个坑**：
+ * 元素的尺寸看起来是"算出来的"，真正的原因却是它被一个语义无关的类撑开了。
+ * **给组件起类名之前先 grep 一遍这个类名有没有全局定义。**
  */
-.wsp-trigger.empty,
-.wsp-trigger.empty:hover {
+.wsp-trigger.blank,
+.wsp-trigger.blank:hover {
   background: var(--bg-2);
   border-color: var(--line);
   border-style: dashed;
@@ -223,12 +232,12 @@ td,
   background: var(--fg-faint);
 }
 
-.wsp-trigger.empty .wsp-caret {
+.wsp-trigger.blank .wsp-caret {
   color: var(--fg-faint);
 }
 
 /* 空态没有面板可开，箭头不该翻转 */
-.wsp-trigger.empty.open .wsp-caret {
+.wsp-trigger.blank.open .wsp-caret {
   transform: none;
 }
 
@@ -874,19 +883,12 @@ td.clickable:hover .link {
 }
 
 /*
- * 「一个工作区都还没有」。
- *
- * 这一屏原来挂的是 `.ok` —— 绿色渐变 + 绿色竖条，读起来是"一切正常"。
- * 但此时连一个工作区都没有，绿色是错的信号（和顶栏那个绿点同一个问题）。
- * 换成中性：不要底色渐变，左边的竖条取一条弱线色，文字用次要色。
+ * 「一个工作区都没有」时横幅**整条不出现**（`.hidden`，不是某个配色类）。
+ * 原来这里有一条 `#banner.empty` 的中性配色 —— 那句话删掉之后就不需要了：
+ * 一句"还没有工作区"和顶栏那个写着「新建工作区」、点一下就开弹窗的下拉
+ * 是同一个意思，说两遍还平白把顶栏和正文切开。
+ * 空态相关的说明集中在下拉那里，别在这里再长出来。
  */
-#banner.empty {
-  background: none;
-  color: var(--fg-dim);
-}
-#banner.empty::before {
-  background: var(--line-strong);
-}
 
 #banner-text {
   font-weight: 500;
@@ -2205,9 +2207,23 @@ tbody tr.selected .ops {
   flex: 0 0 auto;
 }
 
+/*
+ * `font-size` 必须显式写出来。
+ *
+ * 这条选择器里的 `small` 和全局的 `.small { font-size: 12px }` 撞了 ——
+ * 本来只想借这个词表示"小一号的图标按钮"，结果顺带把字号也定成了 12px，
+ * 而那是全局那条规则给的值、不是这里想要的。特指度（0,2,0 > 0,1,0）
+ * 让这里赢，所以以前"看着是对的"，但那是巧合：换个书写顺序或加个
+ * `!important` 就会变。写死之后这个 22px 按钮的字号由自己说了算。
+ *
+ * （同一批扫出来的还有 `.badge.muted` 撞全局 `.muted`：那条只设 color，
+ * 而 `.badge.muted` 特指度更高、已经显式声明了 color，所以无害。
+ * 判据是看撞的那个全局类**到底带了哪些属性**，而不是只看名字撞没撞。）
+ */
 .icon-btn.small {
   width: 22px;
   height: 22px;
+  font-size: 12px;
 }
 
 .icon-btn:hover {

@@ -941,13 +941,17 @@ function renderWsPicker(): void {
    * 它平时是"切到另一个工作区"，而这时候没有任何地方可切 —— 点开只有一句空话。
    * 所以空态下：文案换成「新建工作区」（读起来就像在邀请你点，而不是
    * 一句"还没有工作区"的死描述）、去掉件数、**不生成面板**、
-   * 点它也不展开。样式那边同时把它压灰（见 styles.css 的 `.wsp-trigger.empty`）。
+   * 点它也不展开。样式那边同时把它压灰（见 styles.css 的 `.wsp-trigger.blank`）。
    *
    * 这不是"藏起来"：控件留在原地，位置不跳；灰掉的是它的可操作性。
+   *
+   * 类名用 `blank` 而不是 `empty` —— 样式表里已经有一个全局的 `.empty`
+   * （整页占位块，`padding: 56px 24px`），撞上去这个 26px 的按钮会被撑到
+   * 133px、顶出顶栏压住下面的横幅。详见 styles.css 里那段注释。
    */
-  const empty = list.length === 0;
+  const blank = list.length === 0;
 
-  const trigger = el('button', { class: `wsp-trigger${empty ? ' empty' : ''}`, type: 'button' });
+  const trigger = el('button', { class: `wsp-trigger${blank ? ' blank' : ''}`, type: 'button' });
   /*
    * 状态点。
    *
@@ -956,18 +960,18 @@ function renderWsPicker(): void {
    * 亮着绿灯会让人以为"已经就绪，只是没显示出来"。
    * 所以空态换成暗灰的点：只表示"这里没东西"，不表示"一切正常"。
    */
-  trigger.append(el('span', { class: `wsp-dot${empty ? ' off' : ''}` }));
-  trigger.append(el('span', { class: 'wsp-name', text: empty ? '新建工作区' : (current?.name ?? '') }));
+  trigger.append(el('span', { class: `wsp-dot${blank ? ' off' : ''}` }));
+  trigger.append(el('span', { class: 'wsp-name', text: blank ? '新建工作区' : (current?.name ?? '') }));
   if (current && current.items !== null) {
     trigger.append(el('span', { class: 'wsp-count', text: `${current.items} 件` }));
   }
   trigger.append(el('span', { class: 'wsp-caret', text: '▾' }));
-  if (empty) trigger.setAttribute('aria-disabled', 'true');
+  if (blank) trigger.setAttribute('aria-disabled', 'true');
   host.append(trigger);
 
   const panel = el('div', { class: 'wsp-panel hidden' });
 
-  if (empty) {
+  if (blank) {
     /*
      * 空态没有面板可开，但**点一下要能新建** —— 否则这个灰控件就是死的，
      * 用户只能去「工作区」页绕一圈。直接接上新建弹窗，
@@ -1264,16 +1268,21 @@ function renderBanner(): void {
 
   if (!a) {
     /*
-     * 一个工作区都没有 —— 用中性色，**不是 `.ok`**。
+     * 一个工作区都没有 —— 横幅**整条不出现**。
      *
-     * 绿色的含义是"看过了，一切正常"。而此时根本没东西可看，
-     * 挂绿灯/绿条会让人以为"已经就绪，只是没显示出来"。
-     * （同一处矛盾在顶栏那个状态点上，也一并改成暗灰了。）
+     * 原来这里挂一句「还没有工作区 —— 到「工作区」页新建一个，或直接导入一个归档。」
+     * 现在顶栏那个下拉本身就写着「新建工作区」、点一下直接开新建弹窗，
+     * 说的和做的跟这句话一模一样 —— 再挂一条横幅是同一个意思说两遍。
+     * 而且它还把顶栏和正文切了一刀，让"空"这件事看着更重。
+     *
+     * 弹窗里还有「导入归档为工作区」的入口，所以删掉这句话不会让人
+     * 找不到导入。返回前把 chips 清掉，别留下上一次的残留。
      */
-    banner.className = 'empty';
-    text.append(document.createTextNode('还没有工作区 —— 到「工作区」页新建一个，或直接导入一个归档。'));
+    banner.classList.add('hidden');
+    text.textContent = '';
     return;
   }
+  banner.classList.remove('hidden');
 
   const { expired, soon, lowStock, items } = a.counts;
   const actionable = expired + soon + lowStock;
