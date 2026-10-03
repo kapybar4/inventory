@@ -915,40 +915,68 @@ function renderWsPicker(): void {
   back.addEventListener('click', () => setTab('workspaces'));
   host.append(back);
 
-  const trigger = el('button', { class: 'wsp-trigger', type: 'button' });
-  trigger.append(el('span', { class: 'wsp-dot' }));
-  trigger.append(el('span', { class: 'wsp-name', text: current?.name ?? '（还没有工作区）' }));
+  /*
+   * 一个工作区都没有时，这个下拉**整个不可用**。
+   *
+   * 它平时是"切到另一个工作区"，而这时候没有任何地方可切 —— 点开只有一句空话。
+   * 所以空态下：文案换成「新建工作区」（读起来就像在邀请你点，而不是
+   * 一句"还没有工作区"的死描述）、去掉件数、**不生成面板**、
+   * 点它也不展开。样式那边同时把它压灰（见 styles.css 的 `.wsp-trigger.empty`）。
+   *
+   * 这不是"藏起来"：控件留在原地，位置不跳；灰掉的是它的可操作性。
+   */
+  const empty = list.length === 0;
+
+  const trigger = el('button', { class: `wsp-trigger${empty ? ' empty' : ''}`, type: 'button' });
+  /*
+   * 状态点。
+   *
+   * 平时它是绿的，意思是"这个工作区没问题"。**没有工作区的时候绿灯是错的** ——
+   * 绿色是全套界面里"一切正常"的信号，而此时连一个工作区都还没有，
+   * 亮着绿灯会让人以为"已经就绪，只是没显示出来"。
+   * 所以空态换成暗灰的点：只表示"这里没东西"，不表示"一切正常"。
+   */
+  trigger.append(el('span', { class: `wsp-dot${empty ? ' off' : ''}` }));
+  trigger.append(el('span', { class: 'wsp-name', text: empty ? '新建工作区' : (current?.name ?? '') }));
   if (current && current.items !== null) {
     trigger.append(el('span', { class: 'wsp-count', text: `${current.items} 件` }));
   }
   trigger.append(el('span', { class: 'wsp-caret', text: '▾' }));
+  if (empty) trigger.setAttribute('aria-disabled', 'true');
   host.append(trigger);
 
   const panel = el('div', { class: 'wsp-panel hidden' });
 
-  if (list.length === 0) {
-    panel.append(el('div', { class: 'wsp-empty', text: '还没有工作区' }));
-  } else {
-    for (const w of list) {
-      const item = el('button', { class: `wsp-item${w.id === state.wsId ? ' active' : ''}`, type: 'button' });
+  if (empty) {
+    /*
+     * 空态没有面板可开，但**点一下要能新建** —— 否则这个灰控件就是死的，
+     * 用户只能去「工作区」页绕一圈。直接接上新建弹窗，
+     * 文案（新建工作区）和动作就对上了。
+     */
+    trigger.title = '还没有工作区，点这里新建一个';
+    trigger.addEventListener('click', () => openNewWorkspace());
+    return;
+  }
 
-      const main = el('div', { class: 'wsp-item-main' });
-      main.append(el('span', { class: 'wsp-item-name', text: w.name }));
-      const meta = el('span', { class: 'wsp-item-meta' });
-      meta.append(el('span', { class: `chip-src src-${w.source}`, text: w.sourceLabel }));
-      meta.append(document.createTextNode(` ${w.items ?? 0} 件`));
-      main.append(meta);
-      item.append(main);
+  for (const w of list) {
+    const item = el('button', { class: `wsp-item${w.id === state.wsId ? ' active' : ''}`, type: 'button' });
 
-      if (w.notes) item.append(el('div', { class: 'wsp-item-notes', text: w.notes }));
-      if (w.id === state.wsId) item.append(el('span', { class: 'wsp-check', text: '✓' }));
+    const main = el('div', { class: 'wsp-item-main' });
+    main.append(el('span', { class: 'wsp-item-name', text: w.name }));
+    const meta = el('span', { class: 'wsp-item-meta' });
+    meta.append(el('span', { class: `chip-src src-${w.source}`, text: w.sourceLabel }));
+    meta.append(document.createTextNode(` ${w.items ?? 0} 件`));
+    main.append(meta);
+    item.append(main);
 
-      item.addEventListener('click', () => {
-        closePanel();
-        if (w.id !== state.wsId) void switchWorkspace(w.id);
-      });
-      panel.append(item);
-    }
+    if (w.notes) item.append(el('div', { class: 'wsp-item-notes', text: w.notes }));
+    if (w.id === state.wsId) item.append(el('span', { class: 'wsp-check', text: '✓' }));
+
+    item.addEventListener('click', () => {
+      closePanel();
+      if (w.id !== state.wsId) void switchWorkspace(w.id);
+    });
+    panel.append(item);
   }
 
   const footer = el('div', { class: 'wsp-footer' });
@@ -1215,7 +1243,14 @@ function renderBanner(): void {
   updateTabCounts();
 
   if (!a) {
-    banner.className = 'ok';
+    /*
+     * 一个工作区都没有 —— 用中性色，**不是 `.ok`**。
+     *
+     * 绿色的含义是"看过了，一切正常"。而此时根本没东西可看，
+     * 挂绿灯/绿条会让人以为"已经就绪，只是没显示出来"。
+     * （同一处矛盾在顶栏那个状态点上，也一并改成暗灰了。）
+     */
+    banner.className = 'empty';
     text.append(document.createTextNode('还没有工作区 —— 到「工作区」页新建一个，或直接导入一个归档。'));
     return;
   }

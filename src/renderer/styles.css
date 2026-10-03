@@ -35,6 +35,21 @@
   --bg-1: #0a0a0a;
   --bg-2: #121212;
   --bg-3: #1a1a1a;
+  /*
+   * `--bg-raised` 与 `--bg-3` 同色，但**必须单独声明**（和上面 `--bg-0` 同一个坑）。
+   *
+   * 它被 `.extra-row > td`（展开区那一行）、`.col-row:hover`、`.badge.muted`
+   * 三处引用，却从写下的那天起就没定义过 —— `var()` 找不到变量又没有 fallback
+   * 时**整个声明失效**，于是这三处的背景全是透明的：
+   * 展开区那一行的底色和表格一样，看着不像"另起一段"；
+   * 「过保」徽章也没有底色，只剩一圈描边。
+   *
+   * 查这类问题的办法是**遍历一遍变量表**（引用了但没声明的全列出来），
+   * 别靠眼睛看样式表 —— 少一条声明，代码读起来完全正常。
+   * 顺带记一句：`--accent-soft` 同样是"没声明"，但它每处都写了 fallback
+   * （`var(--accent-soft, rgba(...))`），所以那些规则是好的，不用补。
+   */
+  --bg-raised: #1a1a1a;
   --bg-hover: #212121;
 
   --line: #1f1f1f;
@@ -177,6 +192,46 @@ td,
   flex: 0 0 auto;
 }
 
+/*
+ * 一个工作区都没有时的下拉。
+ *
+ * 它平时是"切到另一个工作区"，而这时候没有任何地方可切。
+ * 压灰 + `cursor: not-allowed` 把"现在没得配"写在光标上；
+ * 悬停**不改变底色**（`background: var(--bg-2)` 与常态相同），
+ * 因为悬停变色是"可点"的信号，而这里不是那个状态。
+ *
+ * 保留 `pointer-events`：点击要能新建工作区（见 app.ts 里那一支），
+ * 所以只改光标与配色，不真的屏蔽点击。
+ */
+.wsp-trigger.empty,
+.wsp-trigger.empty:hover {
+  background: var(--bg-2);
+  border-color: var(--line);
+  border-style: dashed;
+  color: var(--fg-dim);
+  font-weight: 400;
+  cursor: not-allowed;
+}
+
+/*
+ * 空态的状态点：暗灰，不是绿的。
+ *
+ * 绿色在这套界面里是"一切正常"的信号；没有工作区的时候亮绿灯，
+ * 会让人以为"已经就绪，只是没显示出来"。换成暗灰只表示"这里没东西"。
+ */
+.wsp-dot.off {
+  background: var(--fg-faint);
+}
+
+.wsp-trigger.empty .wsp-caret {
+  color: var(--fg-faint);
+}
+
+/* 空态没有面板可开，箭头不该翻转 */
+.wsp-trigger.empty.open .wsp-caret {
+  transform: none;
+}
+
 .wsp-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -294,12 +349,6 @@ td,
   bottom: 8px;
   color: var(--ok);
   font-size: 12px;
-}
-
-.wsp-empty {
-  padding: 14px 12px;
-  color: var(--fg-faint);
-  font-size: 12.5px;
 }
 
 .wsp-footer {
@@ -822,6 +871,21 @@ td.clickable:hover .link {
 }
 #banner.danger::before {
   background: var(--danger);
+}
+
+/*
+ * 「一个工作区都还没有」。
+ *
+ * 这一屏原来挂的是 `.ok` —— 绿色渐变 + 绿色竖条，读起来是"一切正常"。
+ * 但此时连一个工作区都没有，绿色是错的信号（和顶栏那个绿点同一个问题）。
+ * 换成中性：不要底色渐变，左边的竖条取一条弱线色，文字用次要色。
+ */
+#banner.empty {
+  background: none;
+  color: var(--fg-dim);
+}
+#banner.empty::before {
+  background: var(--line-strong);
 }
 
 #banner-text {
