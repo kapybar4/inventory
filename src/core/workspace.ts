@@ -33,7 +33,7 @@ import { openDatabase, backupTo, verifyDatabase, countRows, type VerifyResult } 
 import { EXPORT_TABLE_ORDER } from './fields';
 import { SCHEMA_VERSION } from './schema';
 
-export const REGISTRY_FORMAT = 'dsh-inventory-registry';
+export const REGISTRY_FORMAT = 'inventory-registry';
 export const REGISTRY_VERSION = 1;
 
 /**
@@ -130,7 +130,7 @@ export interface Registry {
 // ─────────────────────────────────────────────────────────────
 
 /** 本应用在 package.json 里的 name —— 认出"哪个 package.json 才是我的" */
-const APP_PACKAGE_NAME = 'dsh-inventory';
+const APP_PACKAGE_NAME = 'inventory';
 
 /**
  * 程序运行目录。数据就放在它下面的 `data/`。
@@ -176,7 +176,7 @@ export function programDir(): string {
  * `data.db` + `meta.json` + `attachments/`），互不影响，拷贝即迁移。
  *
  * 优先级（越靠前越优先）：
- *   1. `DSH_INVENTORY_HOME` —— 测试与"临时换一套数据"用
+ *   1. `INVENTORY_HOME` —— 测试与"临时换一套数据"用
  *   2. 启动配置里用户指定的目录 —— 程序目录写不进去时的出路
  *   3. `<程序目录>/data` —— 默认
  *
@@ -185,7 +185,7 @@ export function programDir(): string {
  * 而配置这件事本身必须存在数据目录**之外**（见 core/bootstrap.ts）。
  */
 export function defaultDataDir(): string {
-  const env = process.env['DSH_INVENTORY_HOME'];
+  const env = process.env['INVENTORY_HOME'];
   if (env && env.trim()) return resolve(env.trim());
   const configured = readBootstrap().dataDir;
   if (configured) return resolve(configured);
@@ -194,7 +194,7 @@ export function defaultDataDir(): string {
 
 /** 数据目录是不是"用户显式配的"（环境变量或启动配置） */
 export function isDataDirConfigured(): boolean {
-  const env = process.env['DSH_INVENTORY_HOME'];
+  const env = process.env['INVENTORY_HOME'];
   if (env && env.trim()) return true;
   return Boolean(readBootstrap().dataDir);
 }
@@ -204,10 +204,10 @@ export function isDataDirConfigured(): boolean {
  *
  * 真去写一个探测文件再删掉，而不是看权限位 —— Windows 上的
  * `Program Files`、被组策略管的目录、只读挂载盘，光看 ACL 很容易判错。
- * 只读检查会短暂创建 `.dsh-write-probe`，随即删除。
+ * 只读检查会短暂创建 `.inventory-write-probe`，随即删除。
  */
 export function isDirWritable(dir: string): { ok: boolean; reason: string } {
-  const probe = join(dir, '.dsh-write-probe');
+  const probe = join(dir, '.inventory-write-probe');
   try {
     mkdirSync(dir, { recursive: true });
     writeFileSync(probe, 'probe', 'utf8');
@@ -241,7 +241,7 @@ export function dataDirStatus(): {
 /** 建议的数据目录：用户主目录下一个明确的位置 */
 export function suggestedDataDir(): string {
   const home = process.env['USERPROFILE'] ?? process.env['HOME'] ?? homedir();
-  return join(home, 'DSH-Inventory-Data');
+  return join(home, 'Inventory-Data');
 }
 
 export function registryPath(dataDir: string): string {
@@ -539,7 +539,7 @@ export function createWorkspaceDir(dataDir: string, opts: CreateWorkspaceOptions
     name: opts.name,
     createdAt: entry.createdAt,
     source: entry.source,
-    app: 'dsh-inventory',
+    app: 'inventory',
     schemaVersion: SCHEMA_VERSION,
   };
   writeFileSync(join(dir, 'meta.json'), JSON.stringify(meta, null, 2), 'utf8');

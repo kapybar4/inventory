@@ -28,7 +28,7 @@ if (!existsSync(CLI)) {
 // 每次从零开始：残留的工作区会让断言里的条数对不上
 rmSync(DB, { recursive: true, force: true });
 
-const env = { ...process.env, DSH_INVENTORY_HOME: DB };
+const env = { ...process.env, INVENTORY_HOME: DB };
 
 function cli(args, label) {
   const r = spawnSync(process.execPath, [CLI, ...args], { cwd: ROOT, env, encoding: 'utf8' });

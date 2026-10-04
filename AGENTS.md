@@ -151,7 +151,7 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   落在哪是两件事，不该互相牵动。界面启动时若发现数据目录里没有 registry.json，
   会往 stderr 打一条提示，就是为了让这类"沉默的空白"至少留下一句话。
 - **数据放在 `<程序目录>/data/`，一个工作区一个子目录。**
-  `defaultDataDir()` = `programDir()` + `data`；`DSH_INVENTORY_HOME` 可覆盖（测试用）。
+  `defaultDataDir()` = `programDir()` + `data`；`INVENTORY_HOME` 可覆盖（测试用）。
   布局：`data/registry.json` 是索引，`data/workspaces/<id>/` 里各有一套
   `data.db` + `meta.json` + `attachments/`，互不影响，**拷贝整个 `data/` 即完成迁移**。
   `programDir()` 是**往上找 `package.json`**，不是用 `process.cwd()` ——
@@ -159,7 +159,7 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   找的过程会先撞上 `node_modules/electron/package.json`，靠 `name` 字段排除。
   打包后代码在 `.asar` 里（不可写），改用 `dirname(process.execPath)`，即 exe 旁边。
   代价：程序若装在 `Program Files` 这类受保护目录里会写不进去，那时用
-  `DSH_INVENTORY_HOME` 指到别处。这是"数据跟着程序走"的**有意取舍**。
+  `INVENTORY_HOME` 指到别处。这是"数据跟着程序走"的**有意取舍**。
 - **数据目录写不进去时，界面整体降级，只有「设置数据目录」能用。**
   这不是"多一个错误提示"：写不进去的话任何一次保存都会失败，而失败点散落在
   几十个按钮上（新增、编辑、领用、分组拖动…），逐个报错只会让人以为程序坏了。
@@ -175,9 +175,9 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   早先它被 `main()` 里的前置检查（数据目录必须存在）挡住了 ——
   一个命令被自己要去解决的条件卡死。现在 `init` / `info` / `config`
   都在免检查名单里。
-- **启动配置存在数据目录之外**（`core/bootstrap.ts`，落在 `%LOCALAPPDATA%\dsh-inventory\config.json`）。
+- **启动配置存在数据目录之外**（`core/bootstrap.ts`，落在 `%LOCALAPPDATA%\inventory\config.json`）。
   把钥匙锁在打不开的抽屉里没有意义：这个文件存在的唯一理由就是
-  数据目录可能写不进去。`DSH_INVENTORY_BOOTSTRAP_HOME` 可以把它整个挪走，
+  数据目录可能写不进去。`INVENTORY_BOOTSTRAP_HOME` 可以把它整个挪走，
   **功能测试必须设它** —— 否则测一次就往真机 `%LOCALAPPDATA%` 写一份配置，
   而那份配置会影响真实应用下次启动去哪找数据。
 - **迁移期间必须 `PRAGMA foreign_keys = OFF`，否则重建表会连坐删掉子表数据。**
@@ -459,9 +459,13 @@ Electron 相关的东西只能出现在 `src/main/`、`src/preload/`、`src/rend
   那一页与 `schema show` 命令在排查问题、写导入脚本时还要用。
   页签选择器一律写成 `.tab:not(.hidden)`，否则会给隐藏按钮绑事件、
   也会把 `.active` 加到看不见的按钮上。
-- **应用显示名（`APP_NAME`）与机器标识是两回事**。显示名可以改（现在叫 `Inventory`），
-  但 `APP_FORMAT` / `REGISTRY_FORMAT` / 数据目录名里那些 `dsh-inventory-*`
-  **一个字符都不能动**：改了老归档读不回来、老数据目录也找不到。
+- **应用显示名（`APP_NAME`）与机器标识是两回事，但两者现在都叫 `Inventory`。**
+  `APP_NAME` = `Inventory`（给人看）；
+  `APP_FORMAT` = `inventory-archive`、`REGISTRY_FORMAT` = `inventory-registry`、
+  数据目录名 = `inventory`（机器读）。**改机器标识的那几个要当成破坏性变更对待**：
+  写进归档 manifest 与 registry.json，读取时严格比对，一改，
+  以前导出的归档就报「format 不匹配」、既有 registry.json 也会被判为格式不符。
+  名字里**没有**厂商前缀是有意的 —— 它们是格式标识，不是显示名。
 - **字段定义里的 `validation` 必须在写入层真的执行。** `validateRow` 要把
   `f.validation` 传给 `validateFieldValue`，后者对 `int` / `money_cents`
   检查 `min`/`max`。当初是怎么坏的：这个参数根本没往下传，于是
@@ -544,7 +548,7 @@ scripts/guitest.mjs    上面三步串起来（npm run test:gui 调它）
 - **必须跑在隔离数据目录上。** 走查会真的新建/改名/删除工作区、改动物品。
   跑在 `data/` 上就是拿用户的真实数据当试验品，而且断言依赖的条数会被
   跑一次变一次，第二次跑必红。`guitest.mjs` 负责注入
-  `DSH_INVENTORY_HOME` 与 `DSH_INVENTORY_BOOTSTRAP_HOME`（后者不隔离的话
+  `INVENTORY_HOME` 与 `INVENTORY_BOOTSTRAP_HOME`（后者不隔离的话
   会往真机 `%LOCALAPPDATA%` 写一份启动配置，**影响真实应用下次去哪找数据**）。
 - **选择器助手只有两个名字：`one(sel)` / `all(sel)`。不要用 `$` / `$$`。**
   它们在一串字符串替换里被误伤过很多次（`$$(` 被改成 `$$$(`、`$$(` 被改成
@@ -809,7 +813,7 @@ scripts/guitest.mjs    上面三步串起来（npm run test:gui 调它）
 npm.cmd run build && npm.cmd run cli -- item list
 
 # 用隔离数据目录试（不碰正式数据）
-$env:DSH_INVENTORY_HOME = "$env:TEMP\inv-dev"
+$env:INVENTORY_HOME = "$env:TEMP\inv-dev"
 npm.cmd run cli -- init --name "测试"
 npm.cmd run cli -- item add --name "布洛芬" -c medicine --brand 芬必得 --model X --expires-on 2027-05-01
 

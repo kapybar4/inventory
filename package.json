@@ -1,5 +1,5 @@
 {
-  "name": "dsh-inventory",
+  "name": "inventory",
   "version": "0.1.0",
   "description": "家庭物品管理 - 多工作区、独立 SQLite、完整命令行工具 + 桌面界面",
   "license": "MIT",
@@ -45,7 +45,7 @@
     "typescript": "7.0.2"
   },
   "build": {
-    "appId": "com.dsh.inventory",
+    "appId": "com.inventory.app",
     "productName": "Inventory",
     "directories": {
       "output": "release"

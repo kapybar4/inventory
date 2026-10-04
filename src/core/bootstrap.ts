@@ -5,8 +5,8 @@
  * （程序装在 `Program Files` 里就会这样）。把钥匙锁在打不开的抽屉里没有意义。
  *
  * 存放位置（按可用性挑，永远是可写的用户级目录）：
- *   Windows  `%LOCALAPPDATA%\dsh-inventory\config.json`
- *   其他     `~/.config/dsh-inventory/config.json`
+ *   Windows  `%LOCALAPPDATA%\inventory\config.json`
+ *   其他     `~/.config/inventory/config.json`
  *
  * 界面与命令行都读同一个文件，所以配置一次两边都生效。
  */
@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from '
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-export const BOOTSTRAP_DIR_NAME = 'dsh-inventory';
+export const BOOTSTRAP_DIR_NAME = 'inventory';
 export const BOOTSTRAP_FILE = 'config.json';
 
 export interface BootstrapConfig {
@@ -32,14 +32,14 @@ export interface BootstrapConfig {
 /**
  * 启动配置所在目录（永远在用户目录下，不随程序安装位置变化）。
  *
- * `DSH_INVENTORY_BOOTSTRAP_HOME` 可以把它整个挪走 —— **专门给测试用**。
+ * `INVENTORY_BOOTSTRAP_HOME` 可以把它整个挪走 —— **专门给测试用**。
  * 不加这个的话，测试跑一次就会往真机的 `%LOCALAPPDATA%` 里写一个
  * `config.json`，而那个文件会影响**真实应用**下次启动时去哪找数据。
  * 测试污染真实配置是最难查的一类问题：现象出现在"下一次手动启动"，
  * 而原因在"上次跑测试"。
  */
 export function bootstrapDir(): string {
-  const override = process.env['DSH_INVENTORY_BOOTSTRAP_HOME'];
+  const override = process.env['INVENTORY_BOOTSTRAP_HOME'];
   if (override && override.trim()) return override.trim();
   const localAppData = process.env['LOCALAPPDATA'];
   if (localAppData && localAppData.trim()) return join(localAppData.trim(), BOOTSTRAP_DIR_NAME);

@@ -309,11 +309,11 @@ test('数据目录默认在程序目录下的 data/，且一个工作区一个�
   try {
     // 环境变量优先，测试都靠它隔离
     const custom = join(root, 'custom');
-    process.env['DSH_INVENTORY_HOME'] = custom;
+    process.env['INVENTORY_HOME'] = custom;
     assert.equal(defaultDataDir(), resolve(custom), '环境变量优先');
     assert.equal(isDataDirConfigured(), true, '环境变量算"已配置"');
 
-    delete process.env['DSH_INVENTORY_HOME'];
+    delete process.env['INVENTORY_HOME'];
     // 不带环境变量时：要么是启动配置里的，要么是 <程序目录>/data
     const d = defaultDataDir();
     assert.ok(d.endsWith(join('', 'data')) || d.includes('data'), `默认目录应落在 data 下：${d}`);
@@ -322,7 +322,7 @@ test('数据目录默认在程序目录下的 data/，且一个工作区一个�
     assert.ok(existsSync(join(pd, 'package.json')), `程序目录应有 package.json：${pd}`);
     assert.ok(!pd.includes('node_modules'), `不能停在 node_modules 里：${pd}`);
     const pkg = JSON.parse(readFileSync(join(pd, 'package.json'), 'utf8')) as { name?: string };
-    assert.equal(pkg.name, 'dsh-inventory', '必须是我们自己的 package.json');
+    assert.equal(pkg.name, 'inventory', '必须是我们自己的 package.json');
   } finally {
     removeTempRoot(root);
   }
@@ -335,7 +335,7 @@ test('可写检测：普通目录可写，文件当目录不可写', () => {
     const r = isDirWritable(okDir);
     assert.equal(r.ok, true, `普通目录应可写：${r.reason}`);
     // 探测文件必须被清掉，不能留垃圾
-    assert.ok(!existsSync(join(okDir, '.dsh-write-probe')), '探测文件应当被删掉');
+    assert.ok(!existsSync(join(okDir, '.inventory-write-probe')), '探测文件应当被删掉');
 
     // 拿一个**文件**当目录用 —— 确定写不进去
     const asDir = join(root, 'file-not-dir');
@@ -365,8 +365,8 @@ test('启动配置：设置数据目录、读回、复位', () => {
     assert.ok(existsSync(bootstrapPath()), '配置文件生成了');
 
     // 设了之后 defaultDataDir 就该听它的
-    const savedEnv = process.env['DSH_INVENTORY_HOME'];
-    delete process.env['DSH_INVENTORY_HOME'];
+    const savedEnv = process.env['INVENTORY_HOME'];
+    delete process.env['INVENTORY_HOME'];
     assert.equal(defaultDataDir(), resolve(target), '配置优先于默认位置');
     assert.equal(isDataDirConfigured(), true);
 
@@ -374,7 +374,7 @@ test('启动配置：设置数据目录、读回、复位', () => {
     assert.equal(readBootstrap().dataDir, undefined, '复位后没有配置了');
     assert.notEqual(defaultDataDir(), resolve(target), '复位后不再指向它');
 
-    if (savedEnv !== undefined) process.env['DSH_INVENTORY_HOME'] = savedEnv;
+    if (savedEnv !== undefined) process.env['INVENTORY_HOME'] = savedEnv;
     if (savedLocal !== undefined) process.env['LOCALAPPDATA'] = savedLocal;
   } finally {
     removeTempRoot(root);
@@ -933,7 +933,7 @@ test('回归：新建工作区不抢默认（否则命令会落到空工作区�
 
 
 function tmpRoot(): string {
-  return mkdtempSync(join(tmpdir(), 'dsh-inv-test-'));
+  return mkdtempSync(join(tmpdir(), 'inventory-test-'));
 }
 
 /**
@@ -1624,7 +1624,7 @@ test('manifest 由字段定义派生，且不含内部列', () => {
     exportedAt: '2026-01-01T00:00:00.000Z',
   });
 
-  assert.equal(manifest.format, 'dsh-inventory-archive');
+  assert.equal(manifest.format, 'inventory-archive');
   assert.equal(manifest.csv.nullLiteral, CSV_CONVENTION.nullLiteral);
   assert.deepEqual(
     manifest.tables.map((t) => t.name),

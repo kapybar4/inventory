@@ -110,7 +110,7 @@ function useLocalUserData(): void {
   try {
     const local = process.env['LOCALAPPDATA'];
     if (!local || !local.trim()) return;
-    app.setPath('userData', join(local.trim(), 'dsh-inventory'));
+    app.setPath('userData', join(local.trim(), 'inventory'));
   } catch {
     /* 设不了就用默认值，不该因为这个起不来 */
   }
@@ -125,14 +125,14 @@ useLocalUserData();
  *
  * 当初这里写的是 `join(app.getPath('userData'), 'inventory')`，而 userData
  * 会被 `--user-data-dir` 改掉 —— 于是同一个应用有了两套数据路径：
- * 命令行看到的是 `%LOCALAPPDATA%\dsh-inventory`，界面却去翻 profile 目录下的
+ * 命令行看到的是 `%LOCALAPPDATA%\inventory`，界面却去翻 profile 目录下的
  * `inventory\`，那里什么都没有。表现就是"命令行有数据，界面上空空如也"，
  * 而且两处都"没报错"，只能靠人比对路径才发现。
  *
  * 数据落在哪，跟 Chromium 的 profile 落在哪，是**两件事**，不该互相牵动。
  * 现在两边（`main.ts` 与 `cli/main.ts`）都调同一个函数，只有一个答案。
  *
- * 优先级：`DSH_INVENTORY_HOME` → `%LOCALAPPDATA%\dsh-inventory` → `~/.dsh-inventory`
+ * 优先级：`INVENTORY_HOME` → `%LOCALAPPDATA%\inventory` → `~/.inventory`
  */
 function dataDir(): string {
   return defaultDataDir();
@@ -409,7 +409,7 @@ function withDb<T>(
       throw new Error(
         `数据目录写不进去，无法保存。\n  目录：${dd}\n  原因：${w.reason}\n` +
           '请换一个可写的目录（界面底部「数据位置」里可以设置），' +
-          '或设环境变量 DSH_INVENTORY_HOME 指到别处。',
+          '或设环境变量 INVENTORY_HOME 指到别处。',
       );
     }
   }
@@ -1566,10 +1566,10 @@ function warnIfDataDirLooksWrong(): void {
   const hasRegistry = existsSync(join(dir, 'registry.json'));
   if (hasRegistry) return;
 
-  const env = process.env['DSH_INVENTORY_HOME'];
+  const env = process.env['INVENTORY_HOME'];
   const hint = env?.trim()
-    ? `（来自环境变量 DSH_INVENTORY_HOME）`
-    : '（默认位置：%LOCALAPPDATA%\\dsh-inventory）';
+    ? `（来自环境变量 INVENTORY_HOME）`
+    : '（默认位置：%LOCALAPPDATA%\\inventory）';
 
   process.stderr.write(
     [
@@ -1578,8 +1578,8 @@ function warnIfDataDirLooksWrong(): void {
       `  目录：${dir} ${hint}`,
       exists ? '  目录存在，但没有 registry.json。' : '  目录不存在。',
       '如果命令行能看到数据、界面却看不到，多半是两边指向了不同目录：',
-      '  用 `dsh-inv info` 看命令行用的是哪个目录，',
-      '  或设 DSH_INVENTORY_HOME 指定同一个目录后重启界面。',
+      '  用 `inventory info` 看命令行用的是哪个目录，',
+      '  或设 INVENTORY_HOME 指定同一个目录后重启界面。',
       '',
     ].join('\n'),
   );

@@ -116,4 +116,4 @@ const api = {
 
 contextBridge.exposeInMainWorld('api', api);
 
-export type DshApi = typeof api;
+export type InventoryApi = typeof api;

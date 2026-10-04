@@ -213,7 +213,7 @@ writeFileSync(
     '    npm.cmd run cli -- item list',
     '    npm.cmd run cli -- ws stats',
     '  要让它看这个文件夹里的数据：',
-    '    set DSH_INVENTORY_HOME=<这个文件夹>\\data',
+    '    set INVENTORY_HOME=<这个文件夹>\\data',
     '',
   ].join('\r\n'),
   'utf8',

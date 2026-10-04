@@ -5,9 +5,10 @@
 设计目标不是记录物品本身，而是**在物品临期时主动提示**。`alert list` 命令与桌面端
 顶部横幅是这一目标的直接体现，数据库仅作为其存储层。
 
-> 应用显示名为 `Inventory`。仓库名与归档格式标识（`dsh-inventory-archive`）
-> 仍保留 `dsh-` 前缀，因为它们是**机器标识**——修改会导致旧归档无法读取、
-> 既有数据目录无法定位。
+> 应用显示名、仓库名与格式标识统一为 `Inventory`：显示名 `Inventory`，
+> 归档格式 `inventory-archive`，注册表格式 `inventory-registry`，数据目录 `inventory`。
+> 格式标识是机器读的（写进归档 manifest 与 `registry.json`，读取时严格比对），
+> 名字里不带厂商前缀 —— 那会让人误以为是一种私有格式。
 
 许可证：[MIT](LICENSE)。
 
@@ -92,14 +93,14 @@ npm.cmd run test:func   # 149 项 CLI 功能测试
 以下方式不会影响正式数据：
 
 ```bash
-$env:DSH_INVENTORY_HOME = "$env:TEMP\inv-demo"   # PowerShell
+$env:INVENTORY_HOME = "$env:TEMP\inv-demo"   # PowerShell
 npm.cmd run cli -- init --name "我的家"
 npm.cmd run cli -- alert list
 ```
 
 ### 仓库中不含任何真实数据
 
-`DSH_INVENTORY_HOME` 默认为**程序目录下的 `data\`**，详见「数据布局」一节。
+`INVENTORY_HOME` 默认为**程序目录下的 `data\`**，详见「数据布局」一节。
 **新建的工作区一律为空**；仓库中的演示数据由程序生成（`src/core/seed.ts`），
 仅在显式执行 `ws seed` 时写入。`.gitignore` 已排除 `_demo/`、`*.db`、`*.zip`。
 
@@ -233,7 +234,7 @@ CSV 导入均可绕过：
 命令行中可直接区分：
 
 ```bash
-dsh-inv alert list --json | jq '.data.counts'
+inventory alert list --json | jq '.data.counts'
 # { "expired": 3, "soon": 4, "warrantyExpired": 1, ... }
 #                      ↑ 仅统计过期      ↑ 过保单列
 ```
@@ -295,7 +296,7 @@ dsh-inv alert list --json | jq '.data.counts'
 
 取消某一组的排序：**再次点击同一个箭头**。该组回到手动顺序，拖动同时恢复。
 
-排序字段（`dsh-inv sort fields` 亦可列出）。
+排序字段（`inventory sort fields` 亦可列出）。
 **箭头指向哪个方向即按哪个方向排序**——下表的"默认方向"仅是命令行 `--sort`
 未附带 `--desc` 时的取值，界面不受此限制：
 
@@ -340,12 +341,12 @@ dsh-inv alert list --json | jq '.data.counts'
   拖动的中间状态与重复请求都不会打乱顺序
 
 ```bash
-dsh-inv item reorder 护照                 # 移到最前
-dsh-inv item reorder 雨伞 --after 布洛芬  # 插入到指定条目之后
-dsh-inv group list                       # 界面上的形式：按分类一级
-dsh-inv group list --levels 3            # 命令行仍可获取三级（分类 > 子类 > 标签）
-dsh-inv group list --sort expiry         # 组内按到期时间
-dsh-inv group list --order '=daily,medicine'   # 固定第一层的组顺序（会被持久化）
+inventory item reorder 护照                 # 移到最前
+inventory item reorder 雨伞 --after 布洛芬  # 插入到指定条目之后
+inventory group list                       # 界面上的形式：按分类一级
+inventory group list --levels 3            # 命令行仍可获取三级（分类 > 子类 > 标签）
+inventory group list --sort expiry         # 组内按到期时间
+inventory group list --order '=daily,medicine'   # 固定第一层的组顺序（会被持久化）
 ```
 
 > 界面上的分组固定一级（只按分类）。`--levels` 是给命令行与脚本用的 ——
@@ -391,10 +392,10 @@ dsh-inv group list --order '=daily,medicine'   # 固定第一层的组顺序（�
 "如何查看该表"，而非任何单件物品的属性。导入产生的副本使用默认列。
 
 ```bash
-dsh-inv column list                          # 查看有哪些列、当前开启哪些
-dsh-inv column set name expiry quantity      # 仅保留三列
-dsh-inv column set --default                 # 恢复默认
-dsh-inv column set --show-all                # 全部开启
+inventory column list                          # 查看有哪些列、当前开启哪些
+inventory column set name expiry quantity      # 仅保留三列
+inventory column set --default                 # 恢复默认
+inventory column set --show-all                # 全部开启
 ```
 
 生效范围为物品页、分组页与概览页的「最先到期」——三者为同一份物品清单，
@@ -442,12 +443,12 @@ dsh-inv column set --show-all                # 全部开启
 因为修改的是同一处数据。
 
 ```bash
-dsh-inv item extra 空调                                  # 查看
-dsh-inv item extra 空调 滤网型号 M8R-FLP                  # 新增 / 修改一个字段
-dsh-inv item extra 空调 滤网型号 ''                        # 删除该字段
-dsh-inv item extra 空调 container 客厅药箱                 # 位置（房间与柜格合成一个自由文本字段）
-dsh-inv item extra 空调 --set '{"a":"1"}'                 # 整份替换
-dsh-inv item add --name 空调 -c digital --extra '{"滤网型号":"M8R-FLP"}'
+inventory item extra 空调                                  # 查看
+inventory item extra 空调 滤网型号 M8R-FLP                  # 新增 / 修改一个字段
+inventory item extra 空调 滤网型号 ''                        # 删除该字段
+inventory item extra 空调 container 客厅药箱                 # 位置（房间与柜格合成一个自由文本字段）
+inventory item extra 空调 --set '{"a":"1"}'                 # 整份替换
+inventory item add --name 空调 -c digital --extra '{"滤网型号":"M8R-FLP"}'
 ```
 
 关于导出的一处细节：JSON 的**键会按字典序重排**后再存储。否则同一份内容因键顺序
@@ -489,7 +490,7 @@ dsh-inv item add --name 空调 -c digital --extra '{"滤网型号":"M8R-FLP"}'
 命令行保留该功能（脚本需要结构化数据）：
 
 ```bash
-dsh-inv timeline --category medicine
+inventory timeline --category medicine
 ```
 
 **范围与粒度均为固定值**：按天分格，覆盖「上周一 ~ 下下周日」共 4 周 28 天。
@@ -502,8 +503,8 @@ dsh-inv timeline --category medicine
 普通物品消耗完（数量为 0）后继续保留只会使列表变长。命令行提供 `item purge`：
 
 ```bash
-dsh-inv item purge --dry-run   # 先查看清单
-dsh-inv item purge --yes       # 执行
+inventory item purge --dry-run   # 先查看清单
+inventory item purge --yes       # 执行
 ```
 
 **批量物品即使数量为 0 也不会被清理**——它可能需要补货，或需要留作记录。
@@ -598,13 +599,13 @@ $env:ELECTRON_RUN_AS_NODE = $null   # 启动 Electron 前清除
 ## 命令行工具
 
 ```
-dsh-inv <命令> [选项]
+inventory <命令> [选项]
 ```
 
 **默认输出人读表格**；附加 `--json` 时输出单个可解析的 JSON 对象。
 
 ```console
-$ dsh-inv alert list --within 30
+$ inventory alert list --within 30
 
 药品 ──────────────────────────────────────────── 4 项 · 3 已过期 · 1 项 15 天内
   类型          名称                            到期日      剩余时间      状态    数量  位置
@@ -636,8 +637,8 @@ $ dsh-inv alert list --within 30
 ### 命令一览
 
 ```
-dsh-inv info                                  应用与数据目录概况
-dsh-inv init [--name 名称]                    初始化数据目录与第一个工作区（空的）
+inventory info                                  应用与数据目录概况
+inventory init [--name 名称]                    初始化数据目录与第一个工作区（空的）
 
 工作区
   ws list                                     列出所有工作区
@@ -686,40 +687,40 @@ dsh-inv init [--name 名称]                    初始化数据目录与第一�
 ```bash
 # 录入：一件物品即一条记录，价格与到期日记录在该条记录自身
 # 药品是「一件」，不需要写 --qty（写了也会被钉回 1）
-dsh-inv item add --name "布洛芬缓释胶囊" -c medicine --brand "芬必得" --spec "0.3g×20粒" \
+inventory item add --name "布洛芬缓释胶囊" -c medicine --brand "芬必得" --spec "0.3g×20粒" \
                  --unit 盒 --container 客厅药箱-上层 \
                  --expires-ym 2027-03 --unit-price 19.30 --store 京东健康
 
 # 同一个东西又买了一盒、到期日不同 → 再 add 一条，两条各自管自己的到期
-dsh-inv item add --name "布洛芬缓释胶囊" -c medicine --expires-on 2026-10-15
+inventory item add --name "布洛芬缓释胶囊" -c medicine --expires-on 2026-10-15
 
 # 批量物品：确实要按个数管理时才开 --bulk，这时数量才有意义
-dsh-inv item add --name "抽纸巾" -c daily --bulk --qty 24 --remaining 24 --min-stock 6
+inventory item add --name "抽纸巾" -c daily --bulk --qty 24 --remaining 24 --min-stock 6
 
 # 查：15 天内到期的、低于下限的
-dsh-inv alert list --within 15
-dsh-inv item list --low-stock
-dsh-inv item list --expiring 60 --category medicine
+inventory alert list --within 15
+inventory item list --low-stock
+inventory item list --expiring 60 --category medicine
 
 # 用：普通物品一次消耗掉；批量物品可领用若干
-dsh-inv item consume MED-0001                              # 数量归 0
-dsh-inv item consume DAY-0001 --qty 3                      # 24 → 21
-dsh-inv item consume MED-0002 --reason expired_dispose     # 过期处理
+inventory item consume MED-0001                              # 数量归 0
+inventory item consume DAY-0001 --qty 3                      # 24 → 21
+inventory item consume MED-0002 --reason expired_dispose     # 过期处理
 
 # 一键清理已消耗完的普通物品（批量物品不会被清）
-dsh-inv item purge --dry-run
-dsh-inv item purge --yes
+inventory item purge --dry-run
+inventory item purge --yes
 
 # 批量录入：写一个 JSON 数组文件
-dsh-inv item add --json-file 购物清单.json
-cat 购物清单.json | dsh-inv item add --stdin
+inventory item add --json-file 购物清单.json
+cat 购物清单.json | inventory item add --stdin
 
 # 维护
-dsh-inv ws stats
-dsh-inv ws verify
-dsh-inv export -o D:\备份\家当.zip
-dsh-inv import D:\备份\家当.zip --dry-run      # 先看报告
-dsh-inv import D:\备份\家当.zip --name "父母家"
+inventory ws stats
+inventory ws verify
+inventory export -o D:\备份\家当.zip
+inventory import D:\备份\家当.zip --dry-run      # 先看报告
+inventory import D:\备份\家当.zip --name "父母家"
 ```
 
 批量录入的 JSON（键名同时接受列名与驼峰写法）：
@@ -754,7 +755,7 @@ dsh-inv import D:\备份\家当.zip --name "父母家"
 2. 统一信封：
 
    ```json
-   { "ok": true, "data": { }, "warnings": [], "meta": { "app": "DSH Inventory", "tookMs": 42 } }
+   { "ok": true, "data": { }, "warnings": [], "meta": { "app": "Inventory", "tookMs": 42 } }
    ```
 
 3. **稳定退出码**：`0` 成功 / `1` 运行错误 / `2` 参数错误 / `3` 数据校验失败 / `4` 未找到
@@ -763,14 +764,14 @@ dsh-inv import D:\备份\家当.zip --name "父母家"
 
 ```bash
 # agent 把归档导入成一个新工作区
-dsh-inv import ./household-inventory-2026-02-14.zip --name "父母家" --json
+inventory import ./household-inventory-2026-02-14.zip --name "父母家" --json
 # → { "ok": true, "data": { "workspaceId": "ws_...", "rowCounts": { "items": 187, ... } } }
 
 # 有错误时退出码 3，且一个字节都没写入
-dsh-inv import ./x.zip --dry-run --json
+inventory import ./x.zip --dry-run --json
 
 # 用 jq 提取
-dsh-inv alert list --within 30 --json | jq '.data.counts'
+inventory alert list --within 30 --json | jq '.data.counts'
 ```
 
 ### 在只有 Electron、没有 Node 的机器上跑
@@ -779,7 +780,7 @@ dsh-inv alert list --within 30 --json | jq '.data.counts'
 
 ```powershell
 $env:ELECTRON_RUN_AS_NODE = 1
-& "C:\...\DSH Inventory.exe" resources\app.asar\dist\cli\main.js alert list --json
+& "C:\...\Inventory.exe" resources\app.asar\dist\cli\main.js alert list --json
 ```
 
 > **PowerShell 的引号坑**：`--item` 后跟内联 JSON 时，PowerShell 会剥掉双引号
@@ -793,7 +794,7 @@ $env:ELECTRON_RUN_AS_NODE = 1
 数据放在**程序运行目录下的 `data/`**，一个工作区一个子目录：
 
 ```
-<程序目录>\data\                          ← 可用 DSH_INVENTORY_HOME 覆盖
+<程序目录>\data\                          ← 可用 INVENTORY_HOME 覆盖
 ├── registry.json                       工作区注册表（原子写入）
 ├── workspaces\
 │   └── ws_01JG8K2M4P7QX9\               一个工作区 = 一个子目录
@@ -824,10 +825,10 @@ $env:ELECTRON_RUN_AS_NODE = 1
 
 ```powershell
 # 界面里点「设置数据目录」，或命令行：
-dsh-inv config data-dir D:\我的家当
+inventory config data-dir D:\我的家当
 
 # 也可以用环境变量（优先级最高）
-$env:DSH_INVENTORY_HOME = 'D:\我的家当'
+$env:INVENTORY_HOME = 'D:\我的家当'
 ```
 
 ### SQLite 配置

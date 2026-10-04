@@ -8,14 +8,14 @@
  *   3. 判定（guiassert.mjs）
  *
  * ── 为什么要有这个包装，而不是直接写在 npm 脚本里 ──
- * 走查必须带上隔离的环境变量（DSH_INVENTORY_HOME 等），而
+ * 走查必须带上隔离的环境变量（INVENTORY_HOME 等），而
  * **npm 脚本里的环境变量写法不跨平台**（VAR=x cmd 在 cmd.exe 里不成立），
  * 引 cross-env 又要多一个依赖 —— 而这个项目运行时是零依赖的。
  * 用 Node 起子进程最省事，也顺带把"必须先建库"这个顺序固定下来。
  *
  * ── 两个必须传的环境变量 ──
- *   DSH_INVENTORY_HOME            数据目录（隔离，指向 _guidb/）
- *   DSH_INVENTORY_BOOTSTRAP_HOME  启动配置（有一份 fallback 路径；
+ *   INVENTORY_HOME            数据目录（隔离，指向 _guidb/）
+ *   INVENTORY_BOOTSTRAP_HOME  启动配置（有一份 fallback 路径；
  *                                 不隔离的话会往真机 %LOCALAPPDATA% 写，
  *                                 而那份配置会影响真实应用下次去哪找数据）
  *
@@ -44,8 +44,8 @@ if (!existsSync(join(ROOT, 'dist', 'cli', 'main.js'))) {
 
 const env = {
   ...process.env,
-  DSH_INVENTORY_HOME: GUIDB,
-  DSH_INVENTORY_BOOTSTRAP_HOME: BOOTSTRAP,
+  INVENTORY_HOME: GUIDB,
+  INVENTORY_BOOTSTRAP_HOME: BOOTSTRAP,
   NODE_NO_WARNINGS: '1',
 };
 // 见文件头：不清掉的话 Electron 以 Node 模式跑，不开窗口

@@ -197,7 +197,7 @@ function stageWorkspace(
 // ─────────────────────────────────────────────────────────────
 
 /** 总目录的格式标识 */
-export const MULTI_FORMAT = 'dsh-inventory-multi';
+export const MULTI_FORMAT = 'inventory-multi';
 export const MULTI_FORMAT_VERSION = 1;
 
 export interface MultiExportItemResult {
@@ -431,7 +431,7 @@ export function renderReadme(manifest: Manifest): string {
   lines.push('## 重新导入');
   lines.push('');
   lines.push('```bash');
-  lines.push(`dsh-inv import "${basename('<本归档>')}" --name "${manifest.workspace.name}"`);
+  lines.push(`inventory import "${basename('<本归档>')}" --name "${manifest.workspace.name}"`);
   lines.push('```');
   lines.push('');
   lines.push('导入会**新建**一个工作区，不会修改任何已有工作区。');

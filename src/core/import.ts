@@ -450,7 +450,7 @@ export function previewArchive(
   const src = resolve(archivePath);
   if (!existsSync(src)) throw new Error(`归档不存在: ${src}`);
 
-  const tempBase = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'dsh-inv-preview-'));
+  const tempBase = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'inventory-preview-'));
   const stage = join(tempBase, 'unpacked');
   try {
     unzipTo(src, stage);
@@ -469,7 +469,7 @@ export function importArchive(archivePath: string, opts: ImportOptions): ImportR
   const src = resolve(archivePath);
   if (!existsSync(src)) throw new Error(`归档不存在: ${src}`);
 
-  const tempBase = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'dsh-inv-import-'));
+  const tempBase = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'inventory-import-'));
   const stage = join(tempBase, 'unpacked');
 
   let created: ReturnType<typeof prepareImportedWorkspace> | null = null;
@@ -676,7 +676,7 @@ export function detectMultiArchive(archivePath: string, tempRoot?: string): {
   const src = resolve(archivePath);
   if (!existsSync(src)) throw new Error(`归档不存在: ${src}`);
 
-  const tempBase = mkdtempSync(join(tempRoot ?? tmpdir(), 'dsh-inv-detect-'));
+  const tempBase = mkdtempSync(join(tempRoot ?? tmpdir(), 'inventory-detect-'));
   const stage = join(tempBase, 'unpacked');
   try {
     unzipTo(src, stage);
@@ -742,7 +742,7 @@ export function importAnything(archivePath: string, opts: ImportOptions): MultiI
 
   // 多工作区：逐个解包一次。每个子目录都是一个合法的单工作区归档，
   // 所以直接把子目录压成临时 zip 复用现成的 importArchive —— 不再写第二套写入逻辑。
-  const tempBase = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'dsh-inv-multi-'));
+  const tempBase = mkdtempSync(join(opts.tempRoot ?? tmpdir(), 'inventory-multi-'));
   const stage = join(tempBase, 'unpacked');
   const items: MultiImportItem[] = [];
 

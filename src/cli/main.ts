@@ -276,7 +276,7 @@ function printSection(title: string, right = ''): void {
 
 const GLOBAL_OPTIONS: OptionSpec[] = [
   { name: 'json', type: 'boolean', desc: '以 JSON 输出（机器可解析，stdout 只有一个对象）' },
-  { name: 'dataDir', type: 'string', desc: '数据根目录，默认 %LOCALAPPDATA%\\dsh-inventory', valueName: 'path' },
+  { name: 'dataDir', type: 'string', desc: '数据根目录，默认 %LOCALAPPDATA%\\inventory', valueName: 'path' },
   { name: 'ws', type: 'string', desc: '指定工作区（id / id 前缀 / 名称）', valueName: 'id' },
   { name: 'help', short: 'h', type: 'boolean', desc: '显示帮助' },
   { name: 'quiet', short: 'q', type: 'boolean', desc: '少输出（只打印关键结果）' },
@@ -776,7 +776,7 @@ function cmdConfigDataDir(args: ParsedArgs): number {
       ]);
       if (!data.writable) {
         write('\n这个目录写不进去。换一个可写的位置：');
-        write(`  dsh-inv config data-dir "${data.fallbackDir}"`);
+        write(`  inventory config data-dir "${data.fallbackDir}"`);
       }
     }
     return EXIT.OK;
@@ -807,7 +807,7 @@ function cmdConfigDataDir(args: ParsedArgs): number {
   } else {
     write(`数据目录已设为：${abs}`);
     write(`设置记在：${bootstrapPath()}`);
-    if (created) write('\n这个目录还没有工作区。用 `dsh-inv init --name "我的家"` 建一个。');
+    if (created) write('\n这个目录还没有工作区。用 `inventory init --name "我的家"` 建一个。');
   }
   return EXIT.OK;
 }
@@ -948,9 +948,9 @@ function cmdWsList(_args: ParsedArgs, dataDir: string): number {
       write(`  ${b.name} —— ${b.statusText}${b.statusReason ? `：${b.statusReason}` : ''}`);
     }
     write('恢复方式：导出备份 → 删除 → 重新导入。');
-    write(`  dsh-inv export --ws "<工作区>" -o 备份.zip`);
-    write(`  dsh-inv ws rm "<工作区>" --yes`);
-    write(`  dsh-inv import 备份.zip`);
+    write(`  inventory export --ws "<工作区>" -o 备份.zip`);
+    write(`  inventory ws rm "<工作区>" --yes`);
+    write(`  inventory import 备份.zip`);
   }
   return EXIT.OK;
 }
@@ -1219,8 +1219,8 @@ function cmdWsVerify(args: ParsedArgs, dataDir: string): number {
   if (quarantined.length > 0) {
     write(`\n已隔离 ${quarantined.length} 个工作区：${quarantined.join('、')}`);
     write('它们现在禁止读写。建议：先导出备份，再删除并重新导入。');
-    write(`  dsh-inv export --ws "<工作区>" -o 备份.zip`);
-    write(`  dsh-inv ws rm "<工作区>" --yes`);
+    write(`  inventory export --ws "<工作区>" -o 备份.zip`);
+    write(`  inventory ws rm "<工作区>" --yes`);
   } else if (bad.length > 0) {
     write('\n（--no-quarantine 或 --dry-run：只报告，未改动状态）');
   }
@@ -1268,9 +1268,9 @@ function cmdWsQuarantine(args: ParsedArgs, dataDir: string): number {
   write(`已把「${updated.name}」标记为异常，读写已被禁止。`);
   write(`原因：${reason}`);
   write('\n恢复方式：先导出备份，再删除并重新导入。');
-  write(`  dsh-inv export --ws "${updated.name}" -o 备份.zip`);
-  write(`  dsh-inv ws rm "${updated.name}" --yes`);
-  write('  dsh-inv import 备份.zip');
+  write(`  inventory export --ws "${updated.name}" -o 备份.zip`);
+  write(`  inventory ws rm "${updated.name}" --yes`);
+  write('  inventory import 备份.zip');
   return EXIT.OK;
 }
 
@@ -1431,7 +1431,7 @@ function cmdItemAdd(args: ParsedArgs, dataDir: string): number {
   if (drafts.length === 0) {
     throw new ArgError(
       '没有要新增的物品。用 --name 指定一个，或用 --json-file / --stdin / --item 传入 JSON。\n' +
-        '例：dsh-inv item add --name "布洛芬缓释胶囊" -c medicine --expires-ym 2027-03 --qty 2 --unit-price 19.30',
+        '例：inventory item add --name "布洛芬缓释胶囊" -c medicine --expires-ym 2027-03 --qty 2 --unit-price 19.30',
     );
   }
 
@@ -2271,7 +2271,7 @@ function cmdItemStock(args: ParsedArgs, dataDir: string): number {
       write(`${String(item['name'])}  ——  ${stocks.length} 组库存，合计 ${totals.remaining}/${totals.quantity}`);
       if (stocks.length === 0) {
         write('还没有配置库存条目：这件批量物品直接用自己的数量与到期日。');
-        write(`加一条：dsh-inv item stock add ${key} --qty 10 --expires-on 2027-03-31`);
+        write(`加一条：inventory item stock add ${key} --qty 10 --expires-on 2027-03-31`);
         return EXIT.OK;
       }
       printTable(stocks, [
@@ -2445,7 +2445,7 @@ function cmdItemPurge(args: ParsedArgs, dataDir: string): number {
     if (!bool(args, 'yes')) {
       throw new ArgError(
         `将删除 ${list.length} 条「非批量且剩余为 0」的记录，需要 --yes 确认。\n` +
-          `先看清单：dsh-inv item purge --dry-run`,
+          `先看清单：inventory item purge --dry-run`,
       );
     }
 
@@ -3678,7 +3678,7 @@ function printHelp(): void {
   write('默认一件就是一件（数量恒为 1，操作是「消耗」）；需要按个数管理的物品加 --bulk 开启「批量」。');
   write('桌面端能做的事，这里全都能做。工作区之间完全隔离，互相不感知。');
   write('');
-  write('用法: dsh-inv <命令> [选项]');
+  write('用法: inventory <命令> [选项]');
   write('');
   write('命令:');
 
@@ -3703,26 +3703,26 @@ function printHelp(): void {
   write('\n退出码: 0 成功 · 1 运行错误 · 2 参数错误 · 3 数据校验失败 · 4 未找到');
   write('输出: 默认人读表格；加 --json 输出机器可解析的单个 JSON 对象。');
   write('\n示例:');
-  write('  dsh-inv init --name "我的家"');
+  write('  inventory init --name "我的家"');
   write('  # 普通物品：一件就是一件，数量恒为 1');
-  write('  dsh-inv item add --name "布洛芬缓释胶囊" -c medicine --brand "芬必得" --unit 盒 \\');
+  write('  inventory item add --name "布洛芬缓释胶囊" -c medicine --brand "芬必得" --unit 盒 \\');
   write('                   --expires-ym 2027-03 --unit-price 19.30 --store 京东健康');
   write('  # 批量物品：需要按个数管理时加 --bulk');
-  write('  dsh-inv item add --name "抽纸巾" -c daily --bulk --qty 24 --remaining 24 --min-stock 6');
-  write('  dsh-inv item consume MED-0001            # 消耗掉（数量归 0）');
-  write('  dsh-inv item consume DEV-0001 --qty 3    # 批量物品领用 3 个');
-  write('  dsh-inv item purge --dry-run            # 看哪些「已消耗完」的能清掉');
-  write(`  dsh-inv alert list --within ${SOON_DAYS}`);
-  write('  dsh-inv export -o D:\\备份\\家当.zip');
-  write('  dsh-inv import D:\\备份\\家当.zip --name "父母家"');
-  write('  dsh-inv item add --json-file 购物清单.json');
-  write('  dsh-inv alert list --json | jq .counts');
+  write('  inventory item add --name "抽纸巾" -c daily --bulk --qty 24 --remaining 24 --min-stock 6');
+  write('  inventory item consume MED-0001            # 消耗掉（数量归 0）');
+  write('  inventory item consume DEV-0001 --qty 3    # 批量物品领用 3 个');
+  write('  inventory item purge --dry-run            # 看哪些「已消耗完」的能清掉');
+  write(`  inventory alert list --within ${SOON_DAYS}`);
+  write('  inventory export -o D:\\备份\\家当.zip');
+  write('  inventory import D:\\备份\\家当.zip --name "父母家"');
+  write('  inventory item add --json-file 购物清单.json');
+  write('  inventory alert list --json | jq .counts');
 }
 
 function printCommandHelp(cmd: Command): void {
   write(`${cmd.summary}`);
   write('');
-  write(`用法: dsh-inv ${cmd.usage}`);
+  write(`用法: inventory ${cmd.usage}`);
   if (cmd.options.length > 0) {
     write('\n选项:');
     for (const o of cmd.options) {
@@ -3798,7 +3798,7 @@ export function main(argv: string[]): number {
    */
   const NO_DATA_DIR_OK = new Set(['init', 'info', 'config']);
   if (!existsSync(dataDir) && !NO_DATA_DIR_OK.has(cmd.path[0] ?? '')) {
-    emitError(EXIT.NOT_FOUND, 'NoDataDir', `数据目录不存在: ${dataDir}。先运行 \`dsh-inv init\`。`, { dataDir });
+    emitError(EXIT.NOT_FOUND, 'NoDataDir', `数据目录不存在: ${dataDir}。先运行 \`inventory init\`。`, { dataDir });
     return EXIT.NOT_FOUND;
   }
 
@@ -3823,9 +3823,9 @@ export function main(argv: string[]): number {
         status: e.status,
         reason: e.reason,
         recovery: [
-          `dsh-inv export --ws "${e.workspaceName}" -o 备份.zip`,
-          `dsh-inv ws rm "${e.workspaceName}" --yes`,
-          'dsh-inv import 备份.zip',
+          `inventory export --ws "${e.workspaceName}" -o 备份.zip`,
+          `inventory ws rm "${e.workspaceName}" --yes`,
+          'inventory import 备份.zip',
         ],
       });
       return EXIT.VALIDATION;

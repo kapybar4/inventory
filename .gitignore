@@ -15,6 +15,10 @@ release/
 _demo/
 _sandbox/
 data/
+# data/ 的备份（重建数据目录前先把旧的挪成 data.backup-<时间戳>）。
+# 那条规则只匹配 `data/` 本身，**不覆盖这个名字** —— 不补这一行，
+# 备份里的一整套真实家当就会以未跟踪状态出现在 `git add -A` 里。
+data.backup-*/
 *.db
 *.db-wal
 *.db-shm

@@ -311,7 +311,7 @@ interface ImportPreview {
   issues?: { table: string; line: number; level: string; message: string }[];
 }
 
-interface DshApi {
+interface InventoryApi {
   app: {
     info(): Promise<AppInfo>;
     schema(): Promise<SchemaInfo>;
@@ -454,7 +454,7 @@ interface DshApi {
 
 declare global {
   interface Window {
-    api: DshApi;
+    api: InventoryApi;
   }
 }
 
@@ -4121,7 +4121,7 @@ function openNewWorkspace(): void {
    * 去掉的理由：新建工作区是**用户要装自己东西**的时刻，
    * 默认塞 17 件虚构物品进去，第一件事就变成"先删掉这些不认识的东西" ——
    * 而删的过程还要一件件确认，比空着难受得多。
-   * 想看效果的人不缺入口：命令行 `dsh-inv ws seed <工作区>` 专门做这件事，
+   * 想看效果的人不缺入口：命令行 `inventory ws seed <工作区>` 专门做这件事，
    * 而且它要求工作区是空的，不会污染已有的数据。
    */
   /*

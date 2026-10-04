@@ -40,10 +40,10 @@ let lastCli = null;
 function cli(args, opts = {}) {
   const env = {
     ...process.env,
-    DSH_INVENTORY_HOME: HOME,
+    INVENTORY_HOME: HOME,
     // 把启动配置也关进临时目录：不然测一次就往真机 %LOCALAPPDATA% 写一份，
     // 而那份配置会影响**真实应用**下次启动去哪找数据。
-    DSH_INVENTORY_BOOTSTRAP_HOME: join(ROOT, 'bootstrap'),
+    INVENTORY_BOOTSTRAP_HOME: join(ROOT, 'bootstrap'),
     NODE_NO_WARNINGS: '1',
     ...(opts.env ?? {}),
   };
@@ -997,7 +997,7 @@ check('导入坏包不落库、不留残目录', () => {
   // 造一个缺 items.csv 的坏包
   const stage = join(ROOT, 'bad');
   mkdirSync(join(stage, 'tables'), { recursive: true });
-  writeFileSync(join(stage, 'manifest.json'), JSON.stringify({ format: 'dsh-inventory-archive', formatVersion: 1 }), 'utf8');
+  writeFileSync(join(stage, 'manifest.json'), JSON.stringify({ format: 'inventory-archive', formatVersion: 1 }), 'utf8');
   writeFileSync(join(stage, 'tables', 'items.csv'), 'name,category\n甲,不存在的分类\n', 'utf8');
   const badZip = join(ROOT, 'bad.zip');
   execFileSync('tar.exe', ['-a', '-c', '-f', badZip, '-C', stage, '.'], { stdio: 'ignore' });
@@ -1820,7 +1820,7 @@ check('config data-dir：查看、设置、复位', () => {
   const bootEnv = { LOCALAPPDATA: fakeLocal };
 
   const before = json(['config', 'data-dir'], bootEnv).data.data;
-  eq(before.dataDir, HOME, '当前数据目录来自 DSH_INVENTORY_HOME');
+  eq(before.dataDir, HOME, '当前数据目录来自 INVENTORY_HOME');
   eq(before.writable, true, '临时目录可写');
   eq(before.configured, true, '环境变量算已配置');
 
@@ -1832,7 +1832,7 @@ check('config data-dir：查看、设置、复位', () => {
   ok(set.data.data.needsInit, '空目录会提示需要 init');
 
   // 优先级（启动配置 vs 默认位置）在这里**测不了**：cli() 的 env 合并是
-  // `{ ...process.env, DSH_INVENTORY_HOME: HOME, ...opts.env }`，而"取消"这个
+  // `{ ...process.env, INVENTORY_HOME: HOME, ...opts.env }`，而"取消"这个
   // 变量在子进程里做不到 —— 传空串或空格都会被 `defaultDataDir()` 当成
   // "设了一个（相对的）路径"。优先级由单元测试覆盖，那条在纯净环境里跑，
   // 能真正删掉变量。这里只确认设置确实落盘了。
@@ -1840,7 +1840,7 @@ check('config data-dir：查看、设置、复位', () => {
   ok(existsSync(set.data.data.bootstrapPath), `启动配置文件已生成：${set.data.data.bootstrapPath}`);
 
   eq(json(['config', 'data-dir', '--reset'], bootEnv).code, 0, '复位成功');
-  // 注意：功能测试里 DSH_INVENTORY_HOME 一直在（cli() 强制注入），
+  // 注意：功能测试里 INVENTORY_HOME 一直在（cli() 强制注入），
   // 所以 `configured` 始终为 true —— 环境变量本身就是一种"已配置"。
   // 能验的是"复位之后设置项没了"：再查一次，数据目录应当只剩两个候选
   // （环境变量 / 程序目录下的 data），而不再是刚设的那个。
