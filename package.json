@@ -4,6 +4,12 @@
   "description": "家庭物品管理 - 多工作区、独立 SQLite、完整命令行工具 + 桌面界面",
   "license": "MIT",
   "author": "kapybar4",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kapybar4/inventory.git"
+  },
+  "homepage": "https://github.com/kapybar4/inventory#readme",
+  "bugs": "https://github.com/kapybar4/inventory/issues",
   "keywords": [
     "inventory",
     "expiry",
