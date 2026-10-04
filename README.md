@@ -10,19 +10,29 @@
 
 ## 安装
 
-### 方式一：绿色版（不装开发环境）
+需要 Node 24 与 npm。本机若执行策略禁止 `npm.ps1`，请用 `npm.cmd`，
+或执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 一次性解决。
 
-从 [Releases](https://github.com/kapybar4/inventory/releases) 下载 zip，解压出 `Inventory` 文件夹，
-双击 `start.cmd` 即可。不需要 Node，不需要 `npm install`。
+```bash
+git clone https://github.com/kapybar4/inventory.git
+cd inventory
+npm.cmd install
+npm.cmd run build
+```
 
+依赖只有 `typescript` / `electron` / `electron-builder`，**运行时零依赖**
+（CSV 解析、参数解析、zip 打包都是自己实现或调用系统能力）。
+
+### 打个包分发给别人
+
+别人不想装 Node 时，可以打一个自包含的文件夹给他：
+
+```bash
+npm.cmd run release     # 产出 release/Inventory/
 ```
-Inventory/
-├─ start.cmd            启动入口
-├─ Inventory.exe        多数环境下也可直接运行
-├─ data/                数据目录（备份、换机只需拷这个）
-├─ profile/             浏览器内核缓存，可删除，会自动重建
-└─ （Electron 运行时的 dll / pak / locales）
-```
+
+里面有 `start.cmd`、`Inventory.exe` 与整份 Electron 运行时（约 370MB）。
+对方解压后双击 `start.cmd` 即可，**不需要 Node，也不需要 `npm install`**。
 
 - **首次启动是空的**，需自行新建工作区。
 - **`data/` 在程序旁边。** 整个文件夹拷到别的机器，数据跟着走，无需配置路径。
@@ -30,26 +40,14 @@ Inventory/
   程序会整页置灰、只保留「设置数据目录」可用。
 - **更新版本：** 替换整个文件夹，**保留 `data/`**。
 
-### 方式二：从源码构建绿色版
-
-```bash
-npm.cmd install
-npm.cmd run release     # 产出 release/Inventory/，约 370MB
-```
-
-构建**完全离线**（用 `node_modules/electron` 里已有的 Electron，
-不访问 github.com）。所以必须先跑过一次 `npm.cmd install`。
+打包过程**完全离线**（用 `node_modules/electron` 里已有的 Electron，
+不访问 github.com），所以必须先跑过一次 `npm.cmd install`。
 
 ---
 
 ## 快速开始
 
 ```bash
-git clone https://github.com/kapybar4/inventory.git
-cd inventory
-npm.cmd install
-npm.cmd run build
-
 npm.cmd run cli -- --help                      # 命令行工具
 npm.cmd run cli -- init --name "我的家"          # 初始化（工作区是空的）
 npm.cmd run cli -- ws seed                     # 可选：写入示例数据
@@ -65,9 +63,6 @@ $env:INVENTORY_HOME = "$env:TEMP\inv-demo"
 npm.cmd run cli -- init --name "试一下"
 ```
 
-> **Windows 提示**：若执行策略禁止 `npm.ps1`，请改用 `npm.cmd`，
-> 或执行 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` 一次性解决。
->
 > 若环境中设了 `ELECTRON_RUN_AS_NODE=1`，Electron 会以 Node 模式启动而不开窗口。
 > 启动界面前清除：`$env:ELECTRON_RUN_AS_NODE = $null`。
 
