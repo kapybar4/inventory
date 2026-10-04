@@ -14,7 +14,9 @@
     "cli": "node dist/cli/main.js",
     "test": "npm run build && node --test \"dist/test/*.test.js\"",
     "test:func": "npm run build && node scripts/functest.mjs",
-    "test:gui": "npm run build && electron scripts/guitest.cjs --no-sandbox",
+    "test:gui": "npm run build && node scripts/guitest.mjs",
+    "test:gui:db": "node scripts/guidb.mjs",
+    "test:gui:run": "node scripts/guitest.mjs",
     "test:all": "npm run test && node scripts/functest.mjs",
     "release": "node scripts/release.mjs",
     "dist:win": "npm run build && electron-builder --win"
