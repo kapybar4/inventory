@@ -60,6 +60,13 @@
 二进制是好的，问题在启动参数；连它都崩（`0x80000003`）才是安装坏了，
 删掉 `node_modules\electron` 重装、再手动跑一次 `node install.js` 下载二进制。
 
+**不要在仓库里跑 `npm link`。** `package.json` 的 `name` 是 `inventory`，
+`bin` 里那条命令**也叫 `inventory`** —— 两者同名时，`npm link` 会把包链进
+全局 `node_modules` 再生成一个指向自身的启动器，于是 `inventory` 调用自己，
+**表现为命令挂住不返回**（不报错、不退出，很容易当成网络慢在等）。
+要全局命令就从仓库外的目录 `npm i -g <本仓库路径>`。
+测试里也用 `npm.cmd run cli --`，不要依赖全局命令。
+
 ---
 
 ## 架构规则（违反了会出大问题）

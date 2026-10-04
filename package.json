@@ -21,6 +21,9 @@
     "保质期"
   ],
   "main": "dist/main/main.js",
+  "bin": {
+    "inventory": "dist/cli/main.js"
+  },
   "engines": {
     "node": ">=24"
   },
